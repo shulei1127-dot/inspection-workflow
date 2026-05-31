@@ -41,3 +41,4 @@ email_tool/data/
 # OS
 .DS_Store
 Thumbs.db
+.venv_linux/
