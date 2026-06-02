@@ -25,10 +25,16 @@ class BatchPushRequest(BaseModel):
 @router.post("/api/sync/run")
 async def trigger_sync(
     sync_month: str | None = Query(None, description="同步月份，格式 YYYY-MM，默认当月"),
+    push: bool = Query(True, description="是否同时推送到钉钉AITable"),
     db: Session = Depends(get_db),
 ):
-    """Pull PTS work orders to local DB (without pushing to DingTalk AITable)."""
-    log = await run_sync(db, trigger_source="manual", sync_month=sync_month, push_to_aitable=False)
+    """Pull PTS work orders to local DB and optionally push to DingTalk AITable."""
+    log = await run_sync(db, trigger_source="manual", sync_month=sync_month, push_to_aitable=push)
+
+    # Auto-adjust planned completion to month end
+    from services.sync_service import adjust_planned_completion_to_month_end
+    adjust_result = adjust_planned_completion_to_month_end(db, month=log.sync_month)
+
     return {
         "status": log.status,
         "sync_month": log.sync_month,
@@ -37,6 +43,7 @@ async def trigger_sync(
         "updated_count": log.updated_count,
         "skipped_count": log.skipped_count,
         "error_message": log.error_message,
+        "adjust_result": adjust_result,
     }
 
 

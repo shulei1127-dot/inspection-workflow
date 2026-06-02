@@ -225,7 +225,10 @@ async function handleFetch() {
   try {
     const month = filters.value.month || undefined
     const res = await runSync(month)
-    const msg = `拉取完成: 新增${res.created_count || 0} 更新${res.updated_count || 0} 共${res.fetched_count || 0}条`
+    const adj = res.adjust_result || {}
+    const msg = `拉取完成: 新增${res.created_count || 0} 更新${res.updated_count || 0} 共${res.fetched_count || 0}条` +
+      (adj.adjusted ? ` | 月末调整: ${adj.adjusted}条` : '') +
+      (adj.pts_updated ? ` | PTS同步: ${adj.pts_updated}条` : '')
     ElMessage.success(msg)
     loadData()
   } catch (e: any) {

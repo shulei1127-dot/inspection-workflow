@@ -118,8 +118,7 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
 def _run_sync_job() -> None:
     """Scheduled sync job runner.
 
-    Pulls PTS work orders for the current month and auto-pushes
-    new/updated data to DingTalk AITable.
+    Full pipeline: PTS pull → local DB → push AITable → adjust planned completion.
     """
     from services.dingtalk_notifier import notify_sync_job
     from models.work_order import WorkOrder
@@ -128,9 +127,10 @@ def _run_sync_job() -> None:
     result = None
 
     try:
-        from services.sync_service import run_sync
+        from services.sync_service import run_sync, adjust_planned_completion_to_month_end
 
         with SessionLocal() as db:
+            # Step 1: Pull PTS work orders and push to AITable
             sync_log = asyncio.run(run_sync(db, trigger_source="scheduler", push_to_aitable=True, only_new_for_month=True))
             logger.info(
                 "Scheduled sync completed: status=%s fetched=%d created=%d updated=%d",
@@ -139,6 +139,19 @@ def _run_sync_job() -> None:
                 sync_log.created_count,
                 sync_log.updated_count,
             )
+
+            # Step 2: Auto-adjust planned completion to month end for current month
+            adjust_result = adjust_planned_completion_to_month_end(db, month=sync_log.sync_month)
+            logger.info(
+                "Auto-adjust planned_completion: adjusted=%d skipped=%d PTS=%d/%d AITable=%d/%d",
+                adjust_result.get("adjusted", 0),
+                adjust_result.get("skipped", 0),
+                adjust_result.get("pts_updated", 0),
+                adjust_result.get("pts_failed", 0),
+                adjust_result.get("aitable_updated", 0),
+                adjust_result.get("aitable_failed", 0),
+            )
+
             # Fetch newly created work orders from the same session
             new_orders = []
             if sync_log.started_at and sync_log.completed_at:
@@ -154,9 +167,10 @@ def _run_sync_job() -> None:
                     }
                     for wo in new_orders
                 ]
-            # Build result dict with new orders
+            # Build result dict with new orders and adjust result
             result = sync_log.__dict__.copy()
             result["new_orders"] = new_orders
+            result["adjust_result"] = adjust_result
     except Exception as e:
         error = str(e)
         logger.exception("Scheduled sync job failed")
