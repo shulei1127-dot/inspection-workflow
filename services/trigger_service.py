@@ -7,6 +7,7 @@ Yunji dispatch now uses direct API calls:
 - Yunji API: direct HTTP with session cookie (yunji_client.py + yunji_dispatch.py)
 """
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -92,16 +93,13 @@ async def _call_yunji_dispatch(
     *,
     trigger_reason: str,
     skip_idempotency: bool = False,
+    max_retries: int = 2,
 ) -> dict:
-    """Core yunji dispatch: direct API call (no Puppeteer).
+    """Core yunji dispatch: direct API call with automatic retry.
 
-    Flow:
-    1. Fetch PTS data via GraphQL API
-    2. Resolve delivery assigner → department → region leader
-    3. Call yunji API directly with session cookie
-    4. Return demandId and orderId
-
-    Returns: {"status": "success"/"failed", "demandId": ..., "orderId": ..., ...}
+    Retries up to max_retries times on transient errors (API returned null,
+    network timeout). Permanent errors (session expired, data missing) are
+    not retried.
     """
     # Idempotency check
     if not skip_idempotency:
@@ -128,40 +126,95 @@ async def _call_yunji_dispatch(
     payload = {"ptsUrl": pts_url, "supplier": supplier}
     log.request_payload = payload
 
-    try:
-        from services.yunji_dispatch import create_yunji_requirement
+    last_error = None
+    for attempt in range(1 + max_retries):
+        try:
+            from services.yunji_dispatch import create_yunji_requirement
 
-        result = await create_yunji_requirement(pts_url, supplier, db=db)
+            result = await create_yunji_requirement(pts_url, supplier, db=db)
 
-        demand_id = result.get("demandId", "")
-        order_id = result.get("orderId", "")
+            demand_id = result.get("demandId", "")
+            order_id = result.get("orderId", "")
 
-        log.status = "success"
-        log.response_body = result
-        log.completed_at = datetime.now(timezone.utc)
-        db.commit()
+            log.status = "success"
+            log.response_body = result
+            log.completed_at = datetime.now(timezone.utc)
+            db.commit()
 
-        return {
-            "status": "success",
-            "demandId": demand_id,
-            "orderId": order_id,
-        }
+            return {
+                "status": "success",
+                "demandId": demand_id,
+                "orderId": order_id,
+            }
 
-    except PermissionError as e:
-        log.status = "failed"
-        log.response_body = {"error": str(e)}
-        log.completed_at = datetime.now(timezone.utc)
-        db.commit()
-        logger.error("Yunji session expired: %s", e)
-        return {"status": "failed", "message": str(e)}
+        except PermissionError as e:
+            # Session expired — permanent error, don't retry
+            log.status = "failed"
+            log.response_body = {"error": str(e)}
+            log.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            logger.error("Yunji session expired: %s", e)
+            return {"status": "failed", "message": str(e)}
 
-    except Exception as e:
-        log.status = "failed"
-        log.response_body = {"error": str(e)}
-        log.completed_at = datetime.now(timezone.utc)
-        db.commit()
-        logger.exception("Yunji dispatch failed")
-        return {"status": "failed", "message": str(e)}
+        except Exception as e:
+            last_error = e
+            is_transient = _is_transient_error(e)
+            if is_transient and attempt < max_retries:
+                logger.warning(
+                    "Dispatch attempt %d/%d failed (transient): %s, retrying in 3s...",
+                    attempt + 1, 1 + max_retries, e,
+                )
+                await asyncio.sleep(3)
+                continue
+            # Permanent error or all retries exhausted
+            log.status = "failed"
+            log.response_body = {"error": str(e)}
+            log.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            logger.exception("Yunji dispatch failed after %d attempts", attempt + 1)
+            return {"status": "failed", "message": str(e)}
+
+    return {"status": "failed", "message": str(last_error)}
+
+
+def _is_transient_error(e: Exception) -> bool:
+    """Determine if an error is transient (worth retrying) vs permanent.
+
+    Transient: API returned null, network timeout, rate limit, temporary 5xx
+    Permanent: session expired, data not found (supplier/assigner/region)
+    """
+    msg = str(e)
+
+    # Permanent patterns — definitely don't retry
+    permanent_patterns = [
+        "session",
+        "已过期",
+        "未配置",
+        "未找到",
+        "权限",
+        "GraphQL 错误",
+    ]
+    for pattern in permanent_patterns:
+        if pattern in msg:
+            return False
+
+    # Transient patterns
+    transient_patterns = [
+        "API返回空结果",
+        "Connection",
+        "timeout",
+        "Timed out",
+        "429",
+        "502",
+        "503",
+        "504",
+    ]
+    for pattern in transient_patterns:
+        if pattern in msg:
+            return True
+
+    # Default: treat unknown errors as transient (safer to retry once)
+    return True
 
 
 async def trigger_email_send(db: Session, work_order_id: uuid.UUID) -> dict:
