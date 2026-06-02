@@ -35,6 +35,8 @@ class WorkOrder(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     dt_synced_at: Mapped[datetime | None] = mapped_column(nullable=True)
     dt_synced_month: Mapped[str | None] = mapped_column(String(7), nullable=True, index=True)  # Format: YYYY-MM
 
+    planned_completion_adjusted: Mapped[bool] = mapped_column(default=False, server_default="false", nullable=False)
+
     # Trigger tracking
     dispatch_status: Mapped[str] = mapped_column(String(32), default="待派单", nullable=False, index=True)
     email_trigger_status: Mapped[str] = mapped_column(String(32), default="待发送", nullable=False, index=True)

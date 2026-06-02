@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: inspection
+      POSTGRES_PASSWORD: inspection
+      POSTGRES_DB: inspection_workflow
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # 不暴露端口到宿主机，app 通过 Docker 内部网络直接访问 db:5432
+    # 如需从宿主机连接数据库，取消下面注释并修改端口避免冲突
+    # ports:
+    #   - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inspection -d inspection_workflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8100:8100"
+    env_file:
+      - .env
+    environment:
+      # 覆盖 .env 中的 DATABASE_URL，指向 Docker 内部 PostgreSQL
+      DATABASE_URL: "postgresql+psycopg://inspection:inspection@db:5432/inspection_workflow"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # dws 认证配置持久化（dws auth login 生成的 token）
+      - dws-config:/root/.config/dws
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  dws-config:

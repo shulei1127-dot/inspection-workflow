@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.egg-info/
+
+# Frontend build cache
+frontend/node_modules/
+
+# Environment & secrets
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+
+# Temp / runtime
+*.docx
+.~*
+email_tool/data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# dws binary is intentionally NOT ignored — it's needed in the Docker image

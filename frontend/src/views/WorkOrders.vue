@@ -85,6 +85,22 @@
         >
           {{ syncing ? '同步中...' : '同步闭环状态' }}
         </el-button>
+        <el-button
+          type="info"
+          :loading="adjusting"
+          :disabled="selectedItems.length === 0"
+          @click="handleAdjustSelected"
+        >
+          {{ adjusting ? '调整中...' : `调整到月末(${selectedItems.length})` }}
+        </el-button>
+        <el-button
+          type="info"
+          :loading="adjustingAll"
+          :disabled="!filters.month"
+          @click="handleAdjustAll"
+        >
+          {{ adjustingAll ? '调整中...' : '当月全部调整到月末' }}
+        </el-button>
       </div>
     </div>
 
@@ -109,7 +125,12 @@
         <el-table-column prop="order_type" label="类型" width="100" show-overflow-tooltip />
         <el-table-column prop="region" label="区域" width="110" show-overflow-tooltip />
         <el-table-column prop="assigner_name" label="交付负责人" width="100" show-overflow-tooltip />
-        <el-table-column prop="planned_completion" label="工单计划完成时间" width="140" />
+        <el-table-column label="工单计划完成时间" width="160">
+          <template #default="{ row }">
+            {{ row.planned_completion }}
+            <el-tag v-if="row.planned_completion_adjusted" type="info" size="small" style="margin-left: 4px">已调整</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="closure_status" label="闭环状态" width="120">
           <template #default="{ row }">
             <el-tag
@@ -144,13 +165,15 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getWorkOrders, runSync, pushToDingtalk, syncClosureStatus, createEventStream, batchPushToDingtalk } from '../api'
+import { getWorkOrders, runSync, pushToDingtalk, syncClosureStatus, createEventStream, batchPushToDingtalk, adjustPlannedCompletion } from '../api'
 
 const loading = ref(false)
 const fetching = ref(false)
 const pushing = ref(false)
 const batchPushing = ref(false)
 const syncing = ref(false)
+const adjusting = ref(false)
+const adjustingAll = ref(false)
 let ws: WebSocket | null = null
 const items = ref<any[]>([])
 const selectedItems = ref<any[]>([])
@@ -260,6 +283,43 @@ async function handleSyncClosureStatus() {
     ElMessage.error('同步失败: ' + e.message)
   } finally {
     syncing.value = false
+  }
+}
+
+async function handleAdjustSelected() {
+  if (selectedItems.value.length === 0) {
+    ElMessage.warning('请先选择要调整的工单')
+    return
+  }
+  adjusting.value = true
+  try {
+    const ids = selectedItems.value.map(item => item.id)
+    const res = await adjustPlannedCompletion({ work_order_ids: ids })
+    ElMessage.success(`调整完成: 已调整${res.adjusted || 0}条 跳过${res.skipped || 0}条`)
+    selectedItems.value = []
+    loadData()
+  } catch (e: any) {
+    ElMessage.error('调整失败: ' + e.message)
+  } finally {
+    adjusting.value = false
+  }
+}
+
+async function handleAdjustAll() {
+  const month = filters.value.month
+  if (!month) {
+    ElMessage.warning('请先选择月份')
+    return
+  }
+  adjustingAll.value = true
+  try {
+    const res = await adjustPlannedCompletion({ month })
+    ElMessage.success(`调整完成: 已调整${res.adjusted || 0}条 跳过${res.skipped || 0}条`)
+    loadData()
+  } catch (e: any) {
+    ElMessage.error('调整失败: ' + e.message)
+  } finally {
+    adjustingAll.value = false
   }
 }
 

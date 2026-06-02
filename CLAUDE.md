@@ -214,7 +214,7 @@ sudo journalctl -u inspection-workflow -f   # 实时日志
 | 任务 | 触发方式 | 时间 | 功能 |
 |------|----------|------|------|
 | PTS→钉钉同步 | CronTrigger | 每天 16:00 | 拉取 PTS 工单 + 推送 AITable |
-| AITable 派单轮询 | IntervalTrigger | 每 5 分钟 | 检测派单条件并触发云集 |
+| AITable 派单轮询 | IntervalTrigger | 每 2 小时 | 检测派单条件并触发云集 |
 | 邵件待发送探测 | CronTrigger | 每 2 小时 | 刷新邮件待发送缓存 |
 | PTS 闭环检查 | CronTrigger | 每天 10:00 | 同步 PTS 闭环状态 + 执行闭环 |
 | 云集 Cookie 保活 | IntervalTrigger | 每 3 小时 | 访问云集页面保持 Session |

@@ -10,3 +10,4 @@ apscheduler>=3.10
 zhipuai>=2.0
 pypinyin>=0.51
 chinesecalendar>=1.9.0
+python-multipart>=0.0.6

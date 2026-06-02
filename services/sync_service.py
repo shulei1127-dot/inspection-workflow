@@ -453,6 +453,8 @@ def _update_work_order(wo: WorkOrder, raw: dict) -> None:
     """Update work order fields from raw PTS data."""
     fields = _extract_fields(raw)
     for key, value in fields.items():
+        if key == "planned_completion" and wo.planned_completion_adjusted:
+            continue
         setattr(wo, key, value)
     wo.raw_data = raw
 
@@ -464,6 +466,8 @@ def _data_changed(wo: WorkOrder, raw: dict) -> bool:
     # Compare key fields
     new_fields = _extract_fields(raw)
     for key, new_value in new_fields.items():
+        if key == "planned_completion" and wo.planned_completion_adjusted:
+            continue
         old_value = getattr(wo, key, None)
         if str(old_value) != str(new_value):
             return True
@@ -663,3 +667,162 @@ def cleanup_stale_running_logs(db: Session) -> None:
 
     db.commit()
     logger.warning("Marked %d stale 'running' sync logs as 'failed'", len(stale_logs))
+
+
+def adjust_planned_completion_to_month_end(
+    db: Session,
+    *,
+    work_order_ids: list[str] | None = None,
+    month: str | None = None,
+) -> dict:
+    """Adjust planned_completion to the last day of its month for selected work orders."""
+    q = db.query(WorkOrder)
+
+    if work_order_ids:
+        uuids = []
+        for wid in work_order_ids:
+            try:
+                uuids.append(uuid.UUID(wid))
+            except ValueError:
+                continue
+        q = q.filter(WorkOrder.id.in_(uuids))
+    elif month:
+        parts = month.split("-")
+        year, m = int(parts[0]), int(parts[1])
+        last_day = calendar.monthrange(year, m)[1]
+        start_date = date(year, m, 1)
+        end_date = date(year, m, last_day)
+        q = q.filter(
+            WorkOrder.planned_completion >= start_date,
+            WorkOrder.planned_completion <= end_date,
+        )
+    else:
+        raise ValueError("Must provide work_order_ids or month")
+
+    q = q.filter(WorkOrder.planned_completion_adjusted == False)  # noqa: E712
+    orders = q.all()
+
+    adjusted = 0
+    skipped = 0
+
+    for wo in orders:
+        if wo.planned_completion is None:
+            skipped += 1
+            continue
+
+        y, m = wo.planned_completion.year, wo.planned_completion.month
+        last_day = calendar.monthrange(y, m)[1]
+        new_date = date(y, m, last_day)
+
+        if wo.planned_completion == new_date:
+            skipped += 1
+            continue
+
+        wo.planned_completion = new_date
+        wo.planned_completion_adjusted = True
+        adjusted += 1
+
+    db.commit()
+
+    # Best-effort: update DAILY_SERVICE AITable records
+    aitable_updated = 0
+    aitable_failed = 0
+    if adjusted > 0:
+        aitable_updated, aitable_failed = _update_aitable_planned_completion(db, orders)
+
+    logger.info(
+        "Adjusted planned_completion: %d adjusted, %d skipped, AITable %d updated / %d failed",
+        adjusted, skipped, aitable_updated, aitable_failed,
+    )
+
+    return {
+        "status": "success",
+        "adjusted": adjusted,
+        "skipped": skipped,
+        "aitable_updated": aitable_updated,
+        "aitable_failed": aitable_failed,
+    }
+
+
+def _update_aitable_planned_completion(db: Session, orders: list[WorkOrder]) -> tuple[int, int]:
+    """Best-effort update of planned_completion in DAILY_SERVICE AITable table."""
+    import asyncio
+    import re
+    from services.aitable_fields import DAILY_SERVICE
+
+    settings = get_settings()
+    if not settings.dt_aitable_base_id or not settings.dt_aitable_table_id:
+        return 0, 0
+
+    # Only process orders that were actually adjusted
+    adjusted_orders = [wo for wo in orders if wo.planned_completion_adjusted]
+    if not adjusted_orders:
+        return 0, 0
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Called from async context — can't run nested event loop
+            logger.warning("Cannot update AITable from async context; skipping AITable planned_completion update")
+            return 0, len(adjusted_orders)
+
+        records = loop.run_until_complete(
+            dingtalk_client.query_records(
+                limit=1000,
+                base_id=settings.dt_aitable_base_id,
+                table_id=settings.dt_aitable_table_id,
+                fetch_all=True,
+            )
+        )
+    except Exception as e:
+        logger.error("Failed to query DAILY_SERVICE AITable for planned_completion update: %s", e)
+        return 0, len(adjusted_orders)
+
+    # Build lookup: pts_order_id → record_id
+    aitable_lookup: dict[str, str] = {}
+    for record in records:
+        cells = record.get("cells", {})
+        link_val = cells.get(DAILY_SERVICE.get("巡检工单链接", ""))
+        url = None
+        if isinstance(link_val, dict):
+            url = link_val.get("link") or link_val.get("text", "")
+        elif isinstance(link_val, str) and link_val.startswith("http"):
+            url = link_val
+
+        if not url:
+            continue
+
+        match = re.search(r'/project/order/([^/?]+)', url)
+        if match:
+            aitable_lookup[match.group(1)] = record.get("recordId", "")
+
+    field_id = DAILY_SERVICE.get("工单计划完成时间")
+    if not field_id:
+        logger.warning("DAILY_SERVICE field ID for 工单计划完成时间 not found")
+        return 0, len(adjusted_orders)
+
+    updated = 0
+    failed = 0
+
+    for wo in adjusted_orders:
+        if wo.pts_order_id not in aitable_lookup:
+            failed += 1
+            continue
+
+        try:
+            loop.run_until_complete(
+                dingtalk_client.update_records(
+                    [{
+                        "recordId": aitable_lookup[wo.pts_order_id],
+                        "cells": {field_id: wo.planned_completion.isoformat() if wo.planned_completion else ""},
+                    }],
+                    base_id=settings.dt_aitable_base_id,
+                    table_id=settings.dt_aitable_table_id,
+                )
+            )
+            updated += 1
+        except Exception as e:
+            logger.error("Failed to update AITable planned_completion for %s: %s", wo.pts_order_id, e)
+            failed += 1
+
+    return updated, failed

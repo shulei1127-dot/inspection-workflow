@@ -146,7 +146,13 @@ async def run_monitor_poll(db: Session) -> dict:
         # Check dispatch trigger condition (only if auto dispatch is enabled)
         if settings.auto_dispatch_enabled:
             has_engineer = bool(wo.engineer and wo.engineer.strip())
+            if not has_engineer:
+                eng_from_cells = extract_engineer(cells.get(DISPATCH["工程师"]))
+                has_engineer = bool(eng_from_cells and eng_from_cells.strip())
             has_supplier = bool(wo.partner_supplier and wo.partner_supplier.strip())
+            if not has_supplier:
+                sup_from_cells = extract_select_name(cells.get(DISPATCH["伙伴供应商"]))
+                has_supplier = bool(sup_from_cells and sup_from_cells.strip())
             if has_engineer and has_supplier and wo.dispatch_status == "待派单":
                 from services.trigger_service import trigger_yunji_dispatch
                 try:
@@ -221,13 +227,23 @@ def _sync_from_aitable(wo: WorkOrder, cells: dict) -> None:
         elif isinstance(email_val, str):
             wo.email_sent = email_val
 
-    # Dispatch level (singleSelect) → maps to dispatch_status
+    # Dispatch level (派单等级) — store in raw_data, NOT dispatch_status.
+    # dispatch_status tracks lifecycle: 待派单 → 已派单 → 派单失败.
+    # 派单等级 is a priority (L1/L2/L3) and must not overwrite it.
     level_val = cells.get(DISPATCH["派单等级"])
     if level_val:
         if isinstance(level_val, dict):
-            wo.dispatch_status = level_val.get("name", str(level_val))
+            level_name = level_val.get("name", str(level_val))
         elif isinstance(level_val, str):
-            wo.dispatch_status = level_val
+            level_name = level_val
+        else:
+            level_name = str(level_val)
+        if level_name:
+            raw = wo.raw_data or {}
+            raw["派单等级"] = level_name
+            wo.raw_data = raw
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(wo, "raw_data")
 
 
 # ── Dispatch monitor (客户巡检派单 table) ──────────────────────────────────────
@@ -270,6 +286,11 @@ async def run_dispatch_monitor_poll(db: Session) -> dict:
 
         cells = record.get("cells", {})
 
+        # Sync AITable fields back to local DB for dashboard consistency
+        wo = db.query(WorkOrder).filter(WorkOrder.dt_record_id == record_id).first()
+        if wo:
+            _sync_from_aitable(wo, cells)
+
         # Extract key field values
         supplier = extract_select_name(cells.get(DISPATCH["伙伴供应商"]))
         engineer = extract_engineer(cells.get(DISPATCH["工程师"]))
@@ -293,8 +314,29 @@ async def run_dispatch_monitor_poll(db: Session) -> dict:
         pts_url = await _find_pts_url(db, customer_name, cells)
         if not pts_url:
             logger.warning(
-                "Dispatch: no PTS URL found for record %s (customer=%s), skipping",
+                "Dispatch: no PTS URL found for record %s (customer=%s), writing error marker",
                 record_id, customer_name,
+            )
+            await _write_back_pts_url_missing(
+                record_id=record_id,
+                customer_name=customer_name,
+                base_id=settings.dt_dispatch_base_id,
+                table_id=settings.dt_dispatch_table_id,
+            )
+            dispatch_failed += 1
+            continue
+
+        # Idempotency check: skip if already dispatched successfully for this record
+        from models.trigger_log import TriggerLog
+        existing_log = db.query(TriggerLog).filter(
+            TriggerLog.trigger_type == "yunji_dispatch",
+            TriggerLog.trigger_reason.contains(f"record={record_id}"),
+            TriggerLog.status == "success",
+        ).first()
+        if existing_log:
+            logger.info(
+                "Dispatch: record %s already dispatched (log %s), skipping",
+                record_id, existing_log.id,
             )
             continue
 
@@ -325,6 +367,7 @@ async def run_dispatch_monitor_poll(db: Session) -> dict:
                     base_id=settings.dt_dispatch_base_id,
                     table_id=settings.dt_dispatch_table_id,
                 )
+                _invalidate_aitable_cache(settings.dt_dispatch_base_id, settings.dt_dispatch_table_id)
                 dispatch_triggered += 1
             else:
                 logger.warning(
@@ -466,6 +509,37 @@ async def _write_back_dispatch_result(
                      record_id, demand_id, order_id)
     except Exception as e:
         logger.error("Failed to write back dispatch result to AITable for record %s: %s", record_id, e)
+
+
+async def _write_back_pts_url_missing(
+    *,
+    record_id: str,
+    customer_name: str | None,
+    base_id: str,
+    table_id: str,
+) -> None:
+    """Write error marker to AITable when PTS URL is not found.
+
+    Sets 需求编号 to a marker so the record is excluded from future polls,
+    and adds a note to 备注 explaining the issue.
+    """
+    marker = f"PTS链接未找到: {customer_name or ''}"
+    try:
+        await dingtalk_client.update_records(
+            records=[{
+                "recordId": record_id,
+                "cells": {
+                    DISPATCH["需求编号"]: marker,
+                    DISPATCH["备注"]: f"自动派单失败：未找到客户 {customer_name or ''} 的PTS工单链接，请手动处理",
+                },
+            }],
+            base_id=base_id,
+            table_id=table_id,
+        )
+        logger.info("Wrote PTS URL missing marker to AITable: record=%s", record_id)
+        _invalidate_aitable_cache(base_id, table_id)
+    except Exception as e:
+        logger.error("Failed to write PTS URL missing marker to AITable for record %s: %s", record_id, e)
 
 
 async def get_dispatch_pending(db: Session, count_only: bool = False) -> dict:

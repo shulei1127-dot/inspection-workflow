@@ -124,6 +124,9 @@ export const pushToDingtalk = (syncMonth?: string) =>
 export const batchPushToDingtalk = (data: { work_order_ids: string[] }) =>
   postJson('/api/sync/batch-push', data)
 
+export const adjustPlannedCompletion = (data: { work_order_ids?: string[]; month?: string }) =>
+  postJson('/api/work-orders/adjust-planned-completion', data)
+
 export const getSyncLogs = (limit = 50) =>
   fetchJson(`/api/sync/logs?limit=${limit}`)
 

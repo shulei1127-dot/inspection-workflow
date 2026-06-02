@@ -38,6 +38,9 @@ static/
 # Runtime data
 email_tool/data/
 
+# Docker build-time binary (copied from host)
+dws
+
 # OS
 .DS_Store
 Thumbs.db

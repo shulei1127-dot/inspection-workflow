@@ -3,7 +3,8 @@
 import calendar
 from datetime import date
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.db import get_db
@@ -92,6 +93,7 @@ def _serialize_work_order(wo: WorkOrder) -> dict:
         "assigner_name": wo.assigner_name,
         "partner_supplier": wo.partner_supplier,
         "planned_completion": wo.planned_completion.isoformat() if wo.planned_completion else None,
+        "planned_completion_adjusted": wo.planned_completion_adjusted,
         "status": wo.status,
         "email_sent": wo.email_sent,
         "dt_sync_status": wo.dt_sync_status,
@@ -101,3 +103,25 @@ def _serialize_work_order(wo: WorkOrder) -> dict:
         "created_at": fmt_cst(wo.created_at),
         "updated_at": fmt_cst(wo.updated_at),
     }
+
+
+class AdjustPlannedCompletionRequest(BaseModel):
+    work_order_ids: list[str] | None = None
+    month: str | None = None
+
+
+@router.post("/api/work-orders/adjust-planned-completion")
+async def adjust_planned_completion(
+    req: AdjustPlannedCompletionRequest,
+    db: Session = Depends(get_db),
+):
+    """Adjust planned_completion to the last day of its month."""
+    if not req.work_order_ids and not req.month:
+        raise HTTPException(400, "Must provide work_order_ids or month")
+
+    from services.sync_service import adjust_planned_completion_to_month_end
+    return adjust_planned_completion_to_month_end(
+        db,
+        work_order_ids=req.work_order_ids,
+        month=req.month,
+    )
