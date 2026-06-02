@@ -724,6 +724,12 @@ def adjust_planned_completion_to_month_end(
 
     db.commit()
 
+    # Update PTS work orders' plan_complete_date
+    pts_updated = 0
+    pts_failed = 0
+    if adjusted > 0:
+        pts_updated, pts_failed = _update_pts_planned_completion(orders)
+
     # Best-effort: update DAILY_SERVICE AITable records
     aitable_updated = 0
     aitable_failed = 0
@@ -731,17 +737,73 @@ def adjust_planned_completion_to_month_end(
         aitable_updated, aitable_failed = _update_aitable_planned_completion(db, orders)
 
     logger.info(
-        "Adjusted planned_completion: %d adjusted, %d skipped, AITable %d updated / %d failed",
-        adjusted, skipped, aitable_updated, aitable_failed,
+        "Adjusted planned_completion: %d adjusted, %d skipped, PTS %d updated / %d failed, AITable %d updated / %d failed",
+        adjusted, skipped, pts_updated, pts_failed, aitable_updated, aitable_failed,
     )
 
     return {
         "status": "success",
         "adjusted": adjusted,
         "skipped": skipped,
+        "pts_updated": pts_updated,
+        "pts_failed": pts_failed,
         "aitable_updated": aitable_updated,
         "aitable_failed": aitable_failed,
     }
+
+
+def _update_pts_planned_completion(orders: list[WorkOrder]) -> tuple[int, int]:
+    """Update PTS work orders' plan_complete_date to the last day of the month.
+
+    Converts local date to UTC datetime string required by PTS API:
+    Beijing time month last day 00:00 → UTC month last day minus 1 day 16:00.
+    """
+    import asyncio as _asyncio
+    import time as _time
+    from datetime import timedelta
+    from services.pts_client import update_work_order_plan_complete_date
+
+    updated = 0
+    failed = 0
+
+    # Only process orders that were actually adjusted
+    adjusted_orders = [wo for wo in orders if wo.planned_completion_adjusted]
+    if not adjusted_orders:
+        return 0, 0
+
+    async def _update_all():
+        nonlocal updated, failed
+        for wo in adjusted_orders:
+            if not wo.planned_completion or not wo.pts_order_id:
+                continue
+
+            # Convert: Beijing time last day 00:00 → UTC (subtract 8 hours)
+            bj_last_day = wo.planned_completion  # already set to month last day
+            utc_dt = datetime(bj_last_day.year, bj_last_day.month, bj_last_day.day, 0, 0, 0) - timedelta(hours=8)
+            utc_str = utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            success = await update_work_order_plan_complete_date(wo.pts_order_id, utc_str)
+            if success:
+                updated += 1
+                logger.info("PTS plan_complete_date updated for %s → %s", wo.pts_order_id, utc_str)
+            else:
+                failed += 1
+                logger.warning("PTS plan_complete_date update failed for %s", wo.pts_order_id)
+
+            # Rate limit: max 5 requests per second per PTS token
+            await _asyncio.sleep(0.25)
+
+    try:
+        loop = _asyncio.get_event_loop()
+        if loop.is_running():
+            logger.warning("Cannot update PTS from async context; skipping PTS planned_completion update")
+            return 0, len(adjusted_orders)
+        loop.run_until_complete(_update_all())
+    except Exception as e:
+        logger.error("Failed to update PTS planned_completion: %s", e)
+        return 0, len(adjusted_orders)
+
+    return updated, failed
 
 
 def _update_aitable_planned_completion(db: Session, orders: list[WorkOrder]) -> tuple[int, int]:

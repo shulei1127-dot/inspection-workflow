@@ -396,3 +396,32 @@ async def confirm_work_order_stage(work_order_id: str) -> bool | None:
 
     result = await pts_graphql_query(mutation)
     return result.get("confirm_work_order_stage")
+
+
+async def update_work_order_plan_complete_date(work_order_id: str, plan_complete_date_utc: str) -> bool:
+    """Update a PTS work order's plan_complete_date via mutation.
+
+    Args:
+        work_order_id: PTS work order ID
+        plan_complete_date_utc: UTC datetime string, e.g. "2026-06-29T16:00:00Z"
+            (represents 2026-06-30 00:00 Beijing time)
+
+    Returns:
+        True on success, False on failure.
+    """
+    mutation = """
+    mutation {
+      update_work_order(id: "%s", input: { plan_complete_date: "%s" })
+    }
+    """ % (work_order_id, plan_complete_date_utc)
+
+    try:
+        result = await pts_graphql_query(mutation)
+        # update_work_order returns Boolean (null/true on success, errors on failure)
+        if result.get("errors"):
+            logger.error("PTS update_work_order failed for %s: %s", work_order_id, result["errors"])
+            return False
+        return True
+    except Exception as e:
+        logger.error("PTS update_work_order exception for %s: %s", work_order_id, e)
+        return False
