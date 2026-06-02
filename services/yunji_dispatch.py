@@ -226,7 +226,7 @@ async def create_yunji_requirement(
     short_name = _parse_supplier_short_name(supplier_short_name)
     supplier_full_name = SUPPLIER_MAP.get(short_name, supplier_short_name)
 
-    logger.info("开始派单: 工单=%s, 供应商=%s(%s)", short_name, supplier_full_name)
+    logger.info("开始派单: 工单=%s, 供应商=%s", short_name, supplier_full_name)
 
     # 1. Fetch PTS data via GraphQL
     logger.info("[1/3] 读取 PTS 工单信息...")
@@ -263,6 +263,10 @@ async def create_yunji_requirement(
         yunji_client.yunji_api("GET", "/api/admin/user/commissioner_list"),
         yunji_client.yunji_api("GET", "/api/admin/user/regional_manager_list"),
     )
+    if cart_item is None:
+        raise RuntimeError("云集购物车创建返回空结果，可能Session已过期")
+    if crm_project is None:
+        raise RuntimeError("云集CRM项目信息返回空结果")
 
     project_name = crm_project.get("name", pts_info["project_name"])
     logger.info("项目: %s, 购物车ID: %s", project_name, cart_item.get("id"))
@@ -338,6 +342,8 @@ async def create_yunji_requirement(
     budget_result = await yunji_client.yunji_api(
         "POST", "/api/admin/requirement/calc_budget", common_body
     )
+    if budget_result is None:
+        raise RuntimeError("云集计算预算API返回空结果，可能Session已过期")
 
     item_data["budget"] = budget_result.get("totalBudget", 0)
     item_data["grossMargin"] = (budget_result.get("grossMargins") or [0])[0]
@@ -352,6 +358,8 @@ async def create_yunji_requirement(
     result = await yunji_client.yunji_api(
         "POST", "/api/admin/requirement/create", common_body
     )
+    if result is None:
+        raise RuntimeError("云集创建需求API返回空结果，可能Session已过期或请求被拒绝")
     demand_id = str(result.get("id", ""))
     logger.info("需求创建成功! ID=%s", demand_id)
 
