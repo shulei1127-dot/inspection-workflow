@@ -2,7 +2,7 @@
 
 Jobs:
 - Sync job: PTS → local DB → DingTalk AITable (daily at 16:00)
-- Dispatch monitor: 客户巡检派单 AITable poll (every 2 hours)
+- Dispatch monitor: 客户巡检派单 AITable poll (workdays 10/12/14/16)
 - Email pre-analysis: pre-analyze email-pending records (daily at 9:00)
 - Closure check: auto-close PTS work orders (daily at 10:00)
 - Yunji keepalive: refresh session cookie (every 3 hours)
@@ -43,18 +43,18 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
         registered_ids.append("sync:pts-to-dingtalk")
         logger.info("Registered sync job with cron: %s", sync_cron)
 
-    # Monitor job: DingTalk AITable poll (客户巡检派单)
+    # Monitor job: DingTalk AITable poll (客户巡检派单) — workdays 10/12/14/16
     if settings.dt_dispatch_base_id and settings.dt_dispatch_table_id:
         scheduler.add_job(
             _run_dispatch_monitor_job,
-            trigger=IntervalTrigger(seconds=settings.dt_poll_interval),
+            trigger=CronTrigger(hour="10,12,14,16", minute="0", day_of_week="mon-fri"),
             id="monitor:dispatch-aitable-poll",
             replace_existing=True,
             max_instances=1,
             coalesce=True,
         )
         registered_ids.append("monitor:dispatch-aitable-poll")
-        logger.info("Registered dispatch monitor job with interval: %ds", settings.dt_poll_interval)
+        logger.info("Registered dispatch monitor job: cron workdays 10/12/14/16")
 
     # Email probe job: refresh email-pending cache for frontend display
     email_probe_cron = settings.email_probe_cron.strip()
@@ -180,7 +180,16 @@ def _run_sync_job() -> None:
 
 
 def _run_dispatch_monitor_job() -> None:
-    """Scheduled dispatch monitor job runner (客户巡检派单)."""
+    """Scheduled dispatch monitor job runner (客户巡检派单).
+
+    Only runs on workdays (respects Chinese holidays + 调休).
+    """
+    from services.dingtalk_notifier import _is_workday_today
+
+    if not _is_workday_today():
+        logger.info("Dispatch monitor skipped: today is a non-workday")
+        return
+
     from services.dingtalk_notifier import notify_dispatch_monitor
 
     error = None
