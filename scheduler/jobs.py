@@ -47,14 +47,14 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
     if settings.dt_dispatch_base_id and settings.dt_dispatch_table_id:
         scheduler.add_job(
             _run_dispatch_monitor_job,
-            trigger=CronTrigger(hour="10,12,14,16", minute="0", day_of_week="mon-fri"),
+            trigger=CronTrigger(hour="10,12,14,16,18", minute="0", day_of_week="mon-fri"),
             id="monitor:dispatch-aitable-poll",
             replace_existing=True,
             max_instances=1,
             coalesce=True,
         )
         registered_ids.append("monitor:dispatch-aitable-poll")
-        logger.info("Registered dispatch monitor job: cron workdays 10/12/14/16")
+        logger.info("Registered dispatch monitor job: cron workdays 10/12/14/16/18")
 
     # Email probe job: refresh email-pending cache for frontend display
     email_probe_cron = settings.email_probe_cron.strip()
