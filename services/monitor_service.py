@@ -264,6 +264,7 @@ async def run_dispatch_monitor_poll(db: Session) -> dict:
     - Write back orderId → LyTZGs5 (订单编号)
     """
     from core.config import get_settings
+    from models.trigger_log import TriggerLog
     settings = get_settings()
     if not settings.dt_dispatch_base_id or not settings.dt_dispatch_table_id:
         return {"status": "skipped", "reason": "Dispatch AITable not configured"}
