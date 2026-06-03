@@ -295,9 +295,6 @@ async def run_closure_check(db: Session) -> dict:
     logger.info("Closure check completed: %s", result)
     return result
 
-    logger.info("Closure check completed: %s", result)
-    return result
-
 
 async def _close_single_work_order(
     db: Session,

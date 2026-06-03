@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from sqlalchemy.orm import Session
 
 from core.db import get_db
@@ -613,11 +613,14 @@ async def get_pre_analysis_status(db: Session = Depends(get_db)):
 
 
 @router.post("/api/email-tool/pre-analysis/run")
-async def trigger_pre_analysis(db: Session = Depends(get_db)):
-    """Manually trigger a pre-analysis cycle."""
+async def trigger_pre_analysis(
+    auto_send: bool = Query(False, description="分析后自动发送邮件"),
+    db: Session = Depends(get_db),
+):
+    """Manually trigger a pre-analysis cycle, optionally auto-send emails."""
     from services.email_pre_analysis import run_email_pre_analysis
 
-    result = await run_email_pre_analysis(db)
+    result = await run_email_pre_analysis(db, auto_send=auto_send)
     return {"status": "success", "result": result}
 
 

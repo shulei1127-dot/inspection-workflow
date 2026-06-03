@@ -60,7 +60,7 @@ async def dispatch_from_aitable(
     if customer_name:
         wo = db.query(WorkOrder).filter(WorkOrder.customer_name == customer_name).first()
 
-    work_order_id = wo.id if wo else uuid.uuid4()
+    work_order_id = wo.id if wo else None
 
     result = await _call_yunji_dispatch(
         db, work_order_id, pts_url, supplier,
@@ -87,7 +87,7 @@ async def dispatch_from_aitable(
 
 async def _call_yunji_dispatch(
     db: Session,
-    work_order_id: uuid.UUID,
+    work_order_id: uuid.UUID | None,
     pts_url: str,
     supplier: str,
     *,
@@ -102,7 +102,7 @@ async def _call_yunji_dispatch(
     not retried.
     """
     # Idempotency check
-    if not skip_idempotency:
+    if not skip_idempotency and work_order_id:
         existing = db.query(TriggerLog).filter(
             TriggerLog.work_order_id == work_order_id,
             TriggerLog.trigger_type == "yunji_dispatch",
@@ -118,7 +118,6 @@ async def _call_yunji_dispatch(
         trigger_type="yunji_dispatch",
         trigger_reason=trigger_reason,
         status="pending",
-        created_at=datetime.now(timezone.utc),
     )
     db.add(log)
     db.commit()
@@ -298,7 +297,7 @@ async def email_from_aitable(
     if customer_name:
         wo = db.query(WorkOrder).filter(WorkOrder.customer_name == customer_name).first()
 
-    work_order_id = wo.id if wo else uuid.uuid4()
+    work_order_id = wo.id if wo else None
 
     # Create trigger log
     log = TriggerLog(

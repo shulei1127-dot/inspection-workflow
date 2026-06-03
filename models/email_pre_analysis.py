@@ -52,3 +52,5 @@ class EmailPreAnalysis(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     refreshed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
+    # Whether the email has been auto-sent after analysis
+    email_sent: Mapped[bool] = mapped_column(default=False, nullable=False)

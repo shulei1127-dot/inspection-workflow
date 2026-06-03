@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from core.db import get_db
 from models.sync_log import SyncLog
 from models.work_order import WorkOrder
-from services.sync_service import run_sync, push_to_aitable, _sync_to_aitable, current_month
+from services.sync_service import run_sync, push_to_aitable, _sync_to_aitable, _build_aitable_url_map, current_month
 from apps.api.utils import fmt_cst
 
 logger = logging.getLogger(__name__)
@@ -66,15 +66,18 @@ async def batch_push_to_dingtalk(
     failed = 0
     sync_month = current_month()
 
+    # Build AITable dedup map once
+    aitable_url_map = await _build_aitable_url_map()
+
     for wo_id_str in req.work_order_ids:
         try:
             wo_id = uuid.UUID(wo_id_str)
             wo = db.query(WorkOrder).filter(WorkOrder.id == wo_id).first()
             if wo:
-                # Reset dt_record_id to force create new record (instead of update)
+                # Reset dt_record_id to force re-sync
                 wo.dt_record_id = None
                 wo.dt_sync_status = "pending"
-                await _sync_to_aitable(db, wo, sync_month=sync_month)
+                await _sync_to_aitable(db, wo, sync_month=sync_month, aitable_url_map=aitable_url_map)
                 # Check if sync was actually successful
                 if wo.dt_sync_status == "synced" and wo.dt_record_id:
                     pushed += 1

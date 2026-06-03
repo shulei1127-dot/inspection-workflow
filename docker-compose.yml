@@ -34,6 +34,9 @@ services:
     volumes:
       # dws 认证配置持久化（dws auth login 生成的 token）
       - dws-config:/root/.config/dws
+      # dws 认证文件（dws CLI 实际读取的目录）+ discovery cache
+      - /root/.local/share/dws-cli:/root/.local/share/dws-cli
+      - /root/.dws:/root/.dws
     restart: unless-stopped
 
 volumes:

@@ -133,7 +133,29 @@ async def notify_sync_job(result: dict, error: str | None = None) -> bool:
         updated = result.get("updated_count", 0)
 
         title = "✅ PTS数据同步任务完成"
-        content = f"- 拉取记录：{fetched} 条\n- 新建记录：{created} 条\n- 更新记录：{updated} 条\n\n状态：{status}"
+        content = f"- 拉取记录：{fetched} 条\n- 新建记录：{created} 条\n- 更新记录：{updated} 条"
+
+        # Add AITable push dedup info
+        skipped = result.get("skipped_count", 0)
+        if skipped:
+            content += f"\n- 跳过(无变化)：{skipped} 条"
+
+        content += f"\n\n状态：{status}"
+
+        # Add month-end adjustment info
+        adjust_result = result.get("adjust_result", {})
+        if adjust_result:
+            adjusted = adjust_result.get("adjusted", 0)
+            skipped_adj = adjust_result.get("skipped", 0)
+            pts_updated = adjust_result.get("pts_updated", 0)
+            pts_failed = adjust_result.get("pts_failed", 0)
+            aitable_updated = adjust_result.get("aitable_updated", 0)
+            aitable_failed = adjust_result.get("aitable_failed", 0)
+            content += f"\n\n月末调整：{adjusted} 条已调整，{skipped_adj} 条跳过"
+            if pts_updated or pts_failed:
+                content += f"\n- PTS同步：{pts_updated} 成功" + (f"，{pts_failed} 失败" if pts_failed else "")
+            if aitable_updated or aitable_failed:
+                content += f"\n- 钉钉同步：{aitable_updated} 成功" + (f"，{aitable_failed} 失败" if aitable_failed else "")
 
         # Add new order links if available
         new_orders = result.get("new_orders", [])
@@ -341,5 +363,13 @@ async def notify_email_pre_analysis(result: dict, error: str | None = None) -> b
 - 跳过：{skipped} 条
 
 ⚠️ 存在失败，请查看日志"""
+
+    # Auto-send results
+    sent = result.get("sent", 0)
+    send_failed = result.get("send_failed", 0)
+    if sent or send_failed:
+        content += f"\n\n自动发送：{sent} 条成功"
+        if send_failed:
+            content += f"，{send_failed} 条失败（需人工确认）"
 
     return await send_dingtalk_notification(title, content)

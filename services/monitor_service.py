@@ -93,6 +93,7 @@ async def _cached_query_records(
 async def run_monitor_poll(db: Session) -> dict:
     """Run a single monitoring poll cycle (reads from 客户巡检派单 table)."""
     from core.config import get_settings
+    from models.trigger_log import TriggerLog
     settings = get_settings()
     logger.info("Monitor poll: base_id=%s table_id=%s", settings.dt_dispatch_base_id, settings.dt_dispatch_table_id)
     if not settings.dt_dispatch_base_id or not settings.dt_dispatch_table_id:
@@ -139,6 +140,7 @@ async def run_monitor_poll(db: Session) -> dict:
                     logger.info("Deleted AITable record %s for completed work order %s", wo.dt_record_id, wo.pts_order_id)
                 except Exception as e:
                     logger.error("Failed to delete AITable record %s: %s", wo.dt_record_id, e)
+            db.query(TriggerLog).filter(TriggerLog.work_order_id == wo.id).delete()
             db.delete(wo)
             db.commit()
             continue
@@ -327,7 +329,6 @@ async def run_dispatch_monitor_poll(db: Session) -> dict:
             continue
 
         # Idempotency check: skip if already dispatched successfully for this record
-        from models.trigger_log import TriggerLog
         existing_log = db.query(TriggerLog).filter(
             TriggerLog.trigger_type == "yunji_dispatch",
             TriggerLog.trigger_reason.contains(f"record={record_id}"),
@@ -346,7 +347,7 @@ async def run_dispatch_monitor_poll(db: Session) -> dict:
             result = await dispatch_from_aitable(
                 db,
                 pts_url=pts_url,
-                supplier=supplier,
+                supplier=supplier or "",
                 record_id=record_id,
                 customer_name=customer_name,
             )

@@ -157,9 +157,12 @@ async def run_sync(
                     sync_month
                 )
 
+            # Build AITable dedup map once for all records to push
+            aitable_url_map = await _build_aitable_url_map()
+
             for wo in records_to_push:
                 try:
-                    await _sync_to_aitable(db, wo, sync_month=sync_month)
+                    await _sync_to_aitable(db, wo, sync_month=sync_month, aitable_url_map=aitable_url_map)
                 except Exception as e:
                     logger.error("Failed to sync work order %s to AITable: %s", wo.pts_order_id, e)
                     wo.dt_sync_status = "failed"
@@ -240,9 +243,12 @@ async def push_to_aitable(db: Session, *, sync_month: str | None = None) -> dict
     pushed = 0
     failed = 0
 
+    # Build AITable dedup map once for all pending records
+    aitable_url_map = await _build_aitable_url_map()
+
     for wo in pending_records:
         try:
-            await _sync_to_aitable(db, wo)
+            await _sync_to_aitable(db, wo, aitable_url_map=aitable_url_map)
             pushed += 1
         except Exception as e:
             logger.error("Failed to push work order %s to AITable: %s", wo.pts_order_id, e)
@@ -263,8 +269,49 @@ async def push_to_aitable(db: Session, *, sync_month: str | None = None) -> dict
     return result
 
 
-async def _sync_to_aitable(db: Session, wo: WorkOrder, sync_month: str | None = None) -> None:
-    """Sync a single work order to AITable (客户巡检派单 table)."""
+async def _build_aitable_url_map() -> dict[str, str]:
+    """Query AITable once and build a mapping of PTS order ID → AITable recordId.
+
+    Used for dedup checks before pushing work orders.
+    """
+    settings = get_settings()
+    field_id = DISPATCH["巡检工单链接"]
+
+    records = await dingtalk_client.query_records(
+        base_id=settings.dt_dispatch_base_id,
+        table_id=settings.dt_dispatch_table_id,
+        fetch_all=True,
+    )
+
+    url_map: dict[str, str] = {}
+    for r in records:
+        cells = r.get("cells", {})
+        url_val = cells.get(field_id, "")
+        url = ""
+        if isinstance(url_val, dict):
+            url = url_val.get("link", url_val.get("text", ""))
+        elif isinstance(url_val, str):
+            url = url_val
+        if url:
+            pts_id = url.rsplit("/", 1)[-1]
+            if pts_id not in url_map:
+                url_map[pts_id] = r.get("recordId")
+
+    logger.debug("Built AITable URL map: %d entries", len(url_map))
+    return url_map
+
+
+async def _sync_to_aitable(db: Session, wo: WorkOrder, sync_month: str | None = None, *, aitable_url_map: dict[str, str] | None = None) -> None:
+    """Sync a single work order to AITable (客户巡检派单 table).
+
+    Before creating a new record, checks if AITable already has one
+    with the same PTS work order URL to prevent duplicates.
+
+    Args:
+        aitable_url_map: Pre-built mapping of pts_order_id → AITable recordId.
+            If provided, skips querying AITable for dedup (performance optimization
+            for batch pushes). If None, queries AITable on-the-fly.
+    """
     settings = get_settings()
     if not settings.dt_dispatch_base_id or not settings.dt_dispatch_table_id:
         logger.warning("AITable dispatch base_id or table_id not configured, skipping sync")
@@ -279,45 +326,68 @@ async def _sync_to_aitable(db: Session, wo: WorkOrder, sync_month: str | None = 
             "recordId": wo.dt_record_id,
             "cells": cells,
         }], base_id=settings.dt_dispatch_base_id, table_id=settings.dt_dispatch_table_id)
-        # Check if update actually succeeded (dws returns data dict with records on success)
         if result is None or (isinstance(result, dict) and not result.get("data") and not result.get("updatedRecordIds")):
-            logger.warning("Update AITable record failed or record not found, will create new: %s", wo.dt_record_id)
-            # Treat as if record doesn't exist, create new instead
+            logger.warning("Update AITable record failed or record not found, will look up existing: %s", wo.dt_record_id)
             wo.dt_record_id = None
         else:
             wo.dt_sync_status = "synced"
             wo.dt_synced_at = datetime.now(timezone.utc)
             wo.dt_synced_month = sync_month or current_month()
             return
+
+    # No dt_record_id — check AITable for existing record with same PTS URL
+    existing_id = None
+    if aitable_url_map:
+        existing_id = aitable_url_map.get(wo.pts_order_id)
     else:
-        # Create new record
-        result = await dingtalk_client.create_records(
-            [{"cells": cells}],
-            base_id=settings.dt_dispatch_base_id,
-            table_id=settings.dt_dispatch_table_id,
-        )
-        if result is None:
-            logger.error("Failed to create AITable record for work order %s", wo.pts_order_id)
-            wo.dt_sync_status = "failed"
+        # Fallback: query AITable on-the-fly (single record push)
+        url_map = await _build_aitable_url_map()
+        existing_id = url_map.get(wo.pts_order_id)
+
+    if existing_id:
+        logger.info("Found existing AITable record %s for work order %s, updating instead of creating", existing_id, wo.pts_order_id)
+        wo.dt_record_id = existing_id
+        # Update the existing record with current data
+        result = await dingtalk_client.update_records([{
+            "recordId": existing_id,
+            "cells": cells,
+        }], base_id=settings.dt_dispatch_base_id, table_id=settings.dt_dispatch_table_id)
+        if result is None or (isinstance(result, dict) and not result.get("data") and not result.get("updatedRecordIds")):
+            logger.warning("Update existing AITable record %s failed, will create new", existing_id)
+            wo.dt_record_id = None
+        else:
+            wo.dt_sync_status = "synced"
+            wo.dt_synced_at = datetime.now(timezone.utc)
+            wo.dt_synced_month = sync_month or current_month()
             return
 
-        got_record_id = False
-        if isinstance(result, dict):
-            # dws returns {"newRecordIds": ["xxx"]}
-            new_ids = result.get("newRecordIds", [])
-            if new_ids:
-                wo.dt_record_id = new_ids[0]
-                got_record_id = True
-        elif isinstance(result, list) and len(result) > 0:
-            rid = result[0].get("recordId") or result[0].get("record_id")
-            if rid:
-                wo.dt_record_id = rid
-                got_record_id = True
+    # Create new record (only if no existing record found or update failed)
+    result = await dingtalk_client.create_records(
+        [{"cells": cells}],
+        base_id=settings.dt_dispatch_base_id,
+        table_id=settings.dt_dispatch_table_id,
+    )
+    if result is None:
+        logger.error("Failed to create AITable record for work order %s", wo.pts_order_id)
+        wo.dt_sync_status = "failed"
+        return
 
-        if not got_record_id:
-            logger.error("AITable create returned no record ID for work order %s, result=%s", wo.pts_order_id, str(result)[:200])
-            wo.dt_sync_status = "failed"
-            return
+    got_record_id = False
+    if isinstance(result, dict):
+        new_ids = result.get("newRecordIds", [])
+        if new_ids:
+            wo.dt_record_id = new_ids[0]
+            got_record_id = True
+    elif isinstance(result, list) and len(result) > 0:
+        rid = result[0].get("recordId") or result[0].get("record_id")
+        if rid:
+            wo.dt_record_id = rid
+            got_record_id = True
+
+    if not got_record_id:
+        logger.error("AITable create returned no record ID for work order %s, result=%s", wo.pts_order_id, str(result)[:200])
+        wo.dt_sync_status = "failed"
+        return
 
     wo.dt_sync_status = "synced"
     wo.dt_synced_at = datetime.now(timezone.utc)

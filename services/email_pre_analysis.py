@@ -83,10 +83,13 @@ def _merge_multi_report_results(ai_infos: list[dict]) -> dict:
     }
 
 
-async def run_email_pre_analysis(db: Session) -> dict:
+async def run_email_pre_analysis(db: Session, *, auto_send: bool = False) -> dict:
     """Pre-analyze email-pending AITable records that haven't been analyzed yet.
 
-    Returns summary: {scanned, new, success, failed, skipped}
+    If auto_send is True, automatically send email for successfully analyzed
+    records that haven't been sent yet.
+
+    Returns summary: {scanned, new, success, failed, skipped, sent, send_failed, send_skipped}
     """
     from services.monitor_service import get_email_pending
 
@@ -156,12 +159,39 @@ async def run_email_pre_analysis(db: Session) -> dict:
             db.commit()
             failed_count += 1
 
+    # Auto-send for successfully analyzed records
+    sent = 0
+    send_failed = 0
+    send_skipped = 0
+
+    if auto_send:
+        eligible = db.query(EmailPreAnalysis).filter(
+            EmailPreAnalysis.analysis_status == "success",
+            EmailPreAnalysis.email_sent == False,
+        ).all()
+
+        for analysis in eligible:
+            try:
+                send_result = await send_email_from_pre_analysis(db, analysis.aitable_record_id)
+                if send_result.get("status") == "success":
+                    sent += 1
+                    logger.info("Auto-send succeeded for record %s", analysis.aitable_record_id)
+                else:
+                    send_failed += 1
+                    logger.warning("Auto-send failed for record %s: %s", analysis.aitable_record_id, send_result.get("message"))
+            except Exception as e:
+                send_failed += 1
+                logger.error("Auto-send exception for record %s: %s", analysis.aitable_record_id, e)
+
     result = {
         "scanned": scanned,
         "new": new_count,
         "success": success_count,
         "failed": failed_count,
         "skipped": skipped_count,
+        "sent": sent,
+        "send_failed": send_failed,
+        "send_skipped": send_skipped,
     }
     logger.info("Email pre-analysis completed: %s", result)
     return result
@@ -521,9 +551,15 @@ async def send_email_from_pre_analysis(
         if wo:
             wo.email_trigger_status = "已发送"
             wo.email_sent = "是"
-            db.commit()
     except Exception as e:
         logger.warning("Failed to update WorkOrder email status: %s", e)
+
+    # Mark pre-analysis as email sent
+    try:
+        analysis.email_sent = True
+        db.commit()
+    except Exception as e:
+        logger.warning("Failed to mark EmailPreAnalysis email_sent: %s", e)
 
     result = {"status": "success", "message": message}
     if closure_result:

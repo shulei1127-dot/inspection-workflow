@@ -343,7 +343,7 @@ async def create_yunji_requirement(
         "POST", "/api/admin/requirement/calc_budget", common_body
     )
     if budget_result is None:
-        raise RuntimeError("云集计算预算API返回空结果，可能Session已过期")
+        raise RuntimeError("云集计算预算API返回空结果（购物车ID=%s），请检查云集平台该项目是否支持外包需求" % cart_item.get("id"))
 
     item_data["budget"] = budget_result.get("totalBudget", 0)
     item_data["grossMargin"] = (budget_result.get("grossMargins") or [0])[0]
@@ -359,7 +359,7 @@ async def create_yunji_requirement(
         "POST", "/api/admin/requirement/create", common_body
     )
     if result is None:
-        raise RuntimeError("云集创建需求API返回空结果，可能Session已过期或请求被拒绝")
+        raise RuntimeError("云集创建需求API返回空结果（购物车ID=%s，项目=%s），请检查云集平台该项目是否支持外包需求" % (cart_item.get("id"), project_name))
     demand_id = str(result.get("id", ""))
     logger.info("需求创建成功! ID=%s", demand_id)
 
