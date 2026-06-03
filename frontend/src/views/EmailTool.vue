@@ -82,7 +82,7 @@
           <el-input v-model="form.quantity" />
         </el-form-item>
         <el-form-item label="收件人邮箱">
-          <el-input v-model="form.recipientEmails" placeholder="输入邮箱或中文姓名，多个用逗号分隔" @blur="normalizeEmails" />
+          <el-input v-model="form.recipientEmails" placeholder="输入邮箱或中文姓名，多个用逗号分隔" @blur="normalizeEmails" @input="userEditedEmails = true" />
           <div class="hint" style="margin-top: 4px">可直接输入中文姓名自动转为长亭邮箱，如：舒磊 → lei.shu@chaitin.com</div>
           <el-alert v-if="form.recipientEmails && !form.recipientEmails.includes('@')" type="warning" :closable="false" style="margin-top: 4px">
             未检测到有效邮箱，请手动添加
@@ -182,6 +182,7 @@ const showConfig = ref(false)
 const history = ref<any[]>([])
 const fromAitable = ref(false)
 const fromPreAnalysis = ref(false)
+const userEditedEmails = ref(false)
 
 const config = reactive({
   sender_email: '',
@@ -275,7 +276,7 @@ async function loadAndApplyPreAnalysis(recordId: string) {
       if (pa.product_name) form.productName = pa.product_name
       if (pa.inspection_date) form.inspectionDate = pa.inspection_date
       if (pa.quantity) form.quantity = pa.quantity
-      if (pa.emails) form.recipientEmails = pa.emails
+      if (pa.emails && !userEditedEmails.value) form.recipientEmails = pa.emails
       if (pa.summaries && pa.summaries.length > 0) {
         form.summaries = pa.summaries
       } else if (pa.summary) {
@@ -314,7 +315,7 @@ async function fetchAitableAttachmentsForRecord(recordId: string) {
     // Update form with server-returned data (more accurate than query params)
     if (res.customer_name) form.customerName = res.customer_name
     if (res.product_name) form.productName = res.product_name
-    if (res.email_address_str) form.recipientEmails = res.email_address_str
+    if (res.email_address_str && !userEditedEmails.value) form.recipientEmails = res.email_address_str
     if (res.sales_name) form.salesName = res.sales_name
 
     // Convert sales name to CC email
@@ -511,7 +512,7 @@ function applyExtractResult(res: any) {
   form.quantity = quantities.join('、')
 
   const allEmails: string[] = res.all_emails || []
-  form.recipientEmails = allEmails.join(', ')
+  if (!userEditedEmails.value) form.recipientEmails = allEmails.join(', ')
 
   form.summaries = res.files.map((f: any) => ({
     product: f.info?.product_name || '产品',
@@ -658,6 +659,7 @@ function handleClear() {
   fileList.value = []
   sendResult.value = null
   fromAitable.value = false
+  userEditedEmails.value = false
   form.customerName = ''
   form.productName = ''
   form.inspectionDate = ''

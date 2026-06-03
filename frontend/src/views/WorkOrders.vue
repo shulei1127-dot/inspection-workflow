@@ -188,7 +188,7 @@ const filters = ref({
   closure_status: '',
 })
 
-const pendingCount = computed(() => items.value.filter(i => i.dt_sync_status !== 'synced').length)
+const pendingCount = ref(0)
 const closedCount = computed(() => items.value.filter(i => i.closure_status === '已闭环').length)
 
 function closureTagType(status: string) {
@@ -213,6 +213,7 @@ async function loadData() {
     })
     items.value = res.items || []
     total.value = res.total || 0
+    pendingCount.value = res.pending_sync_count || 0
   } catch {
     // silent
   } finally {

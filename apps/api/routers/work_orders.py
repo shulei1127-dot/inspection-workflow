@@ -50,10 +50,12 @@ async def list_work_orders(
         q = q.filter(WorkOrder.closure_status == closure_status)
 
     total = q.count()
+    pending_sync_count = q.filter(WorkOrder.dt_sync_status != "synced").count()
     orders = q.order_by(WorkOrder.created_at.desc()).offset(offset).limit(limit).all()
 
     return {
         "total": total,
+        "pending_sync_count": pending_sync_count,
         "items": [_serialize_work_order(wo) for wo in orders],
     }
 

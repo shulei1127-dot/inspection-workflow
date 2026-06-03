@@ -14,7 +14,7 @@
     </div>
 
     <!-- Stat cards -->
-    <div class="stat-row">
+    <div class="stat-row" v-loading="loading">
       <div class="stat-card">
         <div class="label">工单总数</div>
         <div class="value">{{ overview.total || 0 }}</div>
@@ -78,6 +78,7 @@ import { getOverview, getByRegion, getByType, getByStatus, getMonthlyTrend, getD
 
 const selectedMonth = ref<string>('')
 const overview = ref<Record<string, any>>({})
+const loading = ref(false)
 
 const regionChartRef = ref<HTMLElement>()
 const typeChartRef = ref<HTMLElement>()
@@ -94,6 +95,7 @@ function currentMonth() {
 }
 
 async function loadAll() {
+  loading.value = true
   const month = selectedMonth.value || currentMonth()
 
   const [ov, region, type, status, trend, dispatchRes, emailRes] = await Promise.all([
@@ -118,6 +120,7 @@ async function loadAll() {
   renderDispatchChart(status.dispatch_status || [])
   renderEmailChart(status.email_status || [])
   renderTrendChart(trend.items || [])
+  loading.value = false
 }
 
 function renderRegionChart(items: any[]) {
