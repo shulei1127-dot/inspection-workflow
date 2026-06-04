@@ -22,12 +22,14 @@ logger = logging.getLogger(__name__)
 
 
 def _get_name_pinyin(name: str) -> str:
-    """Convert Chinese name to pinyin email format: 舒磊 -> lei.shu@chaitin.com"""
+    """Convert Chinese name to pinyin email format: 舒磊 -> lei.shu@chaitin.com, 杨振兴 -> zhenxing.yang@chaitin.com"""
     try:
         from pypinyin import pinyin, Style
         parts = pinyin(name, style=Style.NORMAL)
         if len(parts) >= 2:
-            return f"{parts[1][0]}.{parts[0][0]}@chaitin.com"
+            surname = parts[0][0]
+            given = "".join(p[0] for p in parts[1:])
+            return f"{given}.{surname}@chaitin.com"
         elif len(parts) == 1:
             return f"{parts[0][0]}@chaitin.com"
     except ImportError:
