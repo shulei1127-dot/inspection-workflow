@@ -378,7 +378,7 @@ async def refresh_aitable_fields_for_send(
     # Parse email list
     email_list = []
     if report_email:
-        for addr in report_email.replace("、", ",").replace("；", ",").split(","):
+        for addr in report_email.replace("、", ",").replace("；", ",").replace("，", ",").split(","):
             addr = addr.strip()
             if addr and "@" in addr:
                 email_list.append(addr)

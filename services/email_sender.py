@@ -127,7 +127,7 @@ def send_email(
 
         with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
             server.login(sender_email, sender_password)
-            server.sendmail(sender_email, all_recipients, msg.as_string())
+            server.sendmail(sender_email, all_recipients, msg.as_bytes())
 
         return True, "发送成功"
     except Exception as e:
