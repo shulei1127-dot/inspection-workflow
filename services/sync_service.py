@@ -159,14 +159,19 @@ async def run_sync(
 
             # Build AITable dedup map once for all records to push
             aitable_url_map = await _build_aitable_url_map()
-
-            for wo in records_to_push:
-                try:
-                    await _sync_to_aitable(db, wo, sync_month=sync_month, aitable_url_map=aitable_url_map)
-                except Exception as e:
-                    logger.error("Failed to sync work order %s to AITable: %s", wo.pts_order_id, e)
-                    wo.dt_sync_status = "failed"
-            db.commit()
+            if aitable_url_map is None:
+                logger.warning("AITable unreachable, skipping push to prevent duplicate records")
+                for wo in records_to_push:
+                    wo.dt_sync_status = "pending"
+                db.commit()
+            else:
+                for wo in records_to_push:
+                    try:
+                        await _sync_to_aitable(db, wo, sync_month=sync_month, aitable_url_map=aitable_url_map)
+                    except Exception as e:
+                        logger.error("Failed to sync work order %s to AITable: %s", wo.pts_order_id, e)
+                        wo.dt_sync_status = "failed"
+                db.commit()
 
         # 4. Update closure_status from AITable data for synced records
         if push_to_aitable:
@@ -245,6 +250,16 @@ async def push_to_aitable(db: Session, *, sync_month: str | None = None) -> dict
 
     # Build AITable dedup map once for all pending records
     aitable_url_map = await _build_aitable_url_map()
+    if aitable_url_map is None:
+        logger.warning("AITable unreachable, aborting push to prevent duplicate records")
+        return {
+            "status": "error",
+            "sync_month": sync_month,
+            "pushed": 0,
+            "failed": 0,
+            "total": len(pending_records),
+            "message": "AITable 不可达，已中止推送以防止重复记录",
+        }
 
     for wo in pending_records:
         try:
@@ -269,10 +284,13 @@ async def push_to_aitable(db: Session, *, sync_month: str | None = None) -> dict
     return result
 
 
-async def _build_aitable_url_map() -> dict[str, str]:
+async def _build_aitable_url_map() -> dict[str, str] | None:
     """Query AITable once and build a mapping of PTS order ID → AITable recordId.
 
     Used for dedup checks before pushing work orders.
+
+    Returns None if AITable query fails, so callers can abort the push
+    instead of silently creating duplicate records.
     """
     settings = get_settings()
     field_id = DISPATCH["巡检工单链接"]
@@ -282,6 +300,10 @@ async def _build_aitable_url_map() -> dict[str, str]:
         table_id=settings.dt_dispatch_table_id,
         fetch_all=True,
     )
+
+    if records is None:
+        logger.warning("AITable query failed in _build_aitable_url_map, returning None to abort push")
+        return None
 
     url_map: dict[str, str] = {}
     for r in records:
@@ -342,6 +364,10 @@ async def _sync_to_aitable(db: Session, wo: WorkOrder, sync_month: str | None = 
     else:
         # Fallback: query AITable on-the-fly (single record push)
         url_map = await _build_aitable_url_map()
+        if url_map is None:
+            logger.warning("AITable unreachable, skipping push for %s to prevent duplicates", wo.pts_order_id)
+            wo.dt_sync_status = "pending"
+            return
         existing_id = url_map.get(wo.pts_order_id)
 
     if existing_id:

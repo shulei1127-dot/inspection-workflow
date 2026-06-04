@@ -68,6 +68,14 @@ async def batch_push_to_dingtalk(
 
     # Build AITable dedup map once
     aitable_url_map = await _build_aitable_url_map()
+    if aitable_url_map is None:
+        return {
+            "status": "error",
+            "pushed": 0,
+            "failed": 0,
+            "total": len(req.work_order_ids),
+            "message": "AITable 不可达，已中止推送以防止重复记录",
+        }
 
     for wo_id_str in req.work_order_ids:
         try:
