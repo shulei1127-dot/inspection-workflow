@@ -624,6 +624,7 @@ def get_pre_analysis_for_records(db: Session, record_ids: list[str]) -> dict[str
             "summary": a.summary,
             "summaries": a.summaries,
             "error_message": a.error_message,
+            "email_sent": a.email_sent,
             "analyzed_at": a.analyzed_at.isoformat() if a.analyzed_at else None,
         }
 

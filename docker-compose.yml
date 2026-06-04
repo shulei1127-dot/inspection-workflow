@@ -37,8 +37,11 @@ services:
       # dws 认证文件（dws CLI 实际读取的目录）+ discovery cache
       - /root/.local/share/dws-cli:/root/.local/share/dws-cli
       - /root/.dws:/root/.dws
+      # 邮件工具数据持久化（发送历史 + SMTP配置）
+      - email-tool-data:/app/email_tool/data
     restart: unless-stopped
 
 volumes:
   pgdata:
   dws-config:
+  email-tool-data:
