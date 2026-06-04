@@ -524,15 +524,16 @@ async def send_email_from_pre_analysis(
     # 5. Send email
     from services.email_sender import send_email as _send_email
 
-    # Build CC: sales name → email conversion
-    cc_emails = ""
+    # Build CC: default CC + sales email
+    default_cc = ["jia.chen@chaitin.com", "kai.wu@chaitin.com", "lei.shu@chaitin.com"]
+    cc_list = list(default_cc)
     sales_name = refreshed.get("sales_name", "")
     if sales_name:
         try:
             from services.email_sender import _get_name_pinyin
             sales_email = _get_name_pinyin(sales_name)
-            if sales_email:
-                cc_emails = sales_email
+            if sales_email and sales_email not in cc_list:
+                cc_list.append(sales_email)
         except Exception:
             pass
 
@@ -541,7 +542,7 @@ async def send_email_from_pre_analysis(
         subject=subject,
         body=body,
         attachments=attachments if attachments else None,
-        cc_emails=cc_emails,
+        cc_emails=",".join(cc_list),
     )
 
     if not success:
