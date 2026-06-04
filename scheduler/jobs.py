@@ -23,6 +23,8 @@ from core.db import SessionLocal
 
 logger = logging.getLogger(__name__)
 
+_SHANGHAI_TZ = get_settings().scheduler_timezone  # "Asia/Shanghai"
+
 
 def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
     """Register all scheduled jobs."""
@@ -34,7 +36,7 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
     if sync_cron:
         scheduler.add_job(
             _run_sync_job,
-            trigger=CronTrigger.from_crontab(sync_cron),
+            trigger=CronTrigger.from_crontab(sync_cron, timezone=_SHANGHAI_TZ),
             id="sync:pts-to-dingtalk",
             replace_existing=True,
             max_instances=1,
@@ -47,7 +49,7 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
     if settings.dt_dispatch_base_id and settings.dt_dispatch_table_id:
         scheduler.add_job(
             _run_dispatch_monitor_job,
-            trigger=CronTrigger(hour="10,12,14,16,18", minute="0", day_of_week="mon-fri"),
+            trigger=CronTrigger(hour="10,12,14,16,18", minute="0", day_of_week="mon-fri", timezone=_SHANGHAI_TZ),
             id="monitor:dispatch-aitable-poll",
             replace_existing=True,
             max_instances=1,
@@ -61,7 +63,7 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
     if email_probe_cron:
         scheduler.add_job(
             _run_email_probe_job,
-            trigger=CronTrigger.from_crontab(email_probe_cron),
+            trigger=CronTrigger.from_crontab(email_probe_cron, timezone=_SHANGHAI_TZ),
             id="monitor:email-probe",
             replace_existing=True,
             max_instances=1,
@@ -75,7 +77,7 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
     if closure_check_cron:
         scheduler.add_job(
             _run_closure_check_job,
-            trigger=CronTrigger.from_crontab(closure_check_cron),
+            trigger=CronTrigger.from_crontab(closure_check_cron, timezone=_SHANGHAI_TZ),
             id="monitor:closure-check",
             replace_existing=True,
             max_instances=1,
@@ -103,7 +105,7 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
         if pre_analysis_cron:
             scheduler.add_job(
                 _run_email_pre_analysis_job,
-                trigger=CronTrigger.from_crontab(pre_analysis_cron),
+                trigger=CronTrigger.from_crontab(pre_analysis_cron, timezone=_SHANGHAI_TZ),
                 id="monitor:email-pre-analysis",
                 replace_existing=True,
                 max_instances=1,
