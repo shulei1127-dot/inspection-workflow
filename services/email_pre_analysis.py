@@ -7,8 +7,10 @@ Key design:
 - At send time, lightweight refresh AITable fields (emails, sales), don't re-run AI
 """
 
+import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -16,6 +18,30 @@ from models.email_pre_analysis import EmailPreAnalysis
 from services.aitable_fields import DISPATCH, extract_text, extract_select_name
 
 logger = logging.getLogger(__name__)
+
+_HISTORY_FILE = Path(__file__).resolve().parent.parent / "email_tool" / "data" / "history.json"
+
+
+def _record_send_history(customer: str, product: str, emails: list[str], files: int, success: bool) -> None:
+    """Append a send record to the shared history file."""
+    try:
+        _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        history = []
+        if _HISTORY_FILE.exists():
+            with open(_HISTORY_FILE, "r", encoding="utf-8") as f:
+                history = json.load(f)
+        history.insert(0, {
+            "time": datetime.now(timezone.utc).isoformat(),
+            "customer": customer,
+            "product": product,
+            "to": ", ".join(emails),
+            "status": "成功" if success else "失败",
+            "files": files,
+        })
+        with open(_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history[:50], f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning("Failed to record send history: %s", e)
 
 
 def _merge_multi_report_results(ai_infos: list[dict]) -> dict:
@@ -520,6 +546,9 @@ async def send_email_from_pre_analysis(
 
     if not success:
         return {"status": "failed", "message": message}
+
+    # Record in send history
+    _record_send_history(customer_name, product_name, email_list, len(attachments), True)
 
     # 6. Post-send: write back AITable, auto-closure, update WorkOrder
     from services.monitor_service import _write_back_email_sent, _invalidate_email_cache, _invalidate_aitable_cache
