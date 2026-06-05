@@ -152,6 +152,11 @@ async def query_records(
         else:
             break
 
+    # Normalize: dws v1.0.33+ returns "cells" instead of "fields"
+    for rec in all_records:
+        if "cells" in rec and "fields" not in rec:
+            rec["fields"] = rec.pop("cells")
+
     logger.debug("query_records: found %d records total", len(all_records))
     return all_records
 
