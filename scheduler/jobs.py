@@ -105,14 +105,14 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
         if pre_analysis_cron:
             scheduler.add_job(
                 _run_email_pre_analysis_job,
-                trigger=CronTrigger.from_crontab(pre_analysis_cron, timezone=_SHANGHAI_TZ),
+                trigger=CronTrigger(hour="10,14,16,18", minute="30", day_of_week="mon-fri", timezone=_SHANGHAI_TZ),
                 id="monitor:email-pre-analysis",
                 replace_existing=True,
                 max_instances=1,
                 coalesce=True,
             )
             registered_ids.append("monitor:email-pre-analysis")
-            logger.info("Registered email pre-analysis job with cron: %s", pre_analysis_cron)
+            logger.info("Registered email pre-analysis job: cron workdays 10:30/14:30/16:30/18:30")
 
     return registered_ids
 
@@ -319,7 +319,16 @@ def _run_closure_check_job() -> None:
 
 
 def _run_email_pre_analysis_job() -> None:
-    """Scheduled email pre-analysis job runner."""
+    """Scheduled email pre-analysis job runner.
+
+    Only runs on workdays (respects Chinese holidays + 调休).
+    """
+    from services.dingtalk_notifier import _is_workday_today
+
+    if not _is_workday_today():
+        logger.info("Email pre-analysis skipped: today is a non-workday")
+        return
+
     from services.dingtalk_notifier import notify_email_pre_analysis
 
     error = None
