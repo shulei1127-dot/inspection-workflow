@@ -257,7 +257,7 @@ async def _analyze_single_record(
         db.commit()
         return {"success": False, "error": "record not found"}
 
-    cells = target.get("cells", {})
+    cells = target.get("fields", {})
     report_attachments = cells.get(DISPATCH["巡检报告"])
 
     if not isinstance(report_attachments, list) or len(report_attachments) == 0:
@@ -367,7 +367,7 @@ async def refresh_aitable_fields_for_send(
     if not target:
         return {"error": "AITable record not found"}
 
-    cells = target.get("cells", {})
+    cells = target.get("fields", {})
 
     # Extract lightweight fields
     report_email = extract_text(cells.get(DISPATCH["报告发送邮箱"])) or ""
@@ -465,7 +465,7 @@ async def send_email_from_pre_analysis(
     if not target:
         return {"status": "error", "message": f"AITable 中未找到记录 {record_id}"}
 
-    cells = target.get("cells", {})
+    cells = target.get("fields", {})
     report_attachments = cells.get(DISPATCH["巡检报告"])
 
     if not isinstance(report_attachments, list) or len(report_attachments) == 0:

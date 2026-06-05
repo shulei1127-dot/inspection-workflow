@@ -307,7 +307,7 @@ async def _build_aitable_url_map() -> dict[str, str] | None:
 
     url_map: dict[str, str] = {}
     for r in records:
-        cells = r.get("cells", {})
+        cells = r.get("fields", {})
         url_val = cells.get(field_id, "")
         url = ""
         if isinstance(url_val, dict):
@@ -695,7 +695,7 @@ async def _update_closure_status_from_aitable(db: Session) -> None:
     # Build lookup: pts_order_id → (inspection_complete, has_report)
     aitable_status: dict[str, tuple[bool, bool]] = {}
     for record in records:
-        cells = record.get("cells", {})
+        cells = record.get("fields", {})
         link_val = cells.get(DISPATCH["巡检工单链接"])
 
         # Extract pts_order_id from URL
@@ -939,7 +939,7 @@ def _update_aitable_planned_completion(db: Session, orders: list[WorkOrder]) -> 
     # Build lookup: pts_order_id → record_id
     aitable_lookup: dict[str, str] = {}
     for record in records:
-        cells = record.get("cells", {})
+        cells = record.get("fields", {})
         link_val = cells.get(DAILY_SERVICE.get("巡检工单链接", ""))
         url = None
         if isinstance(link_val, dict):

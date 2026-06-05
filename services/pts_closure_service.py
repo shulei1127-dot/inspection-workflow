@@ -138,7 +138,7 @@ async def run_closure_check(db: Session) -> dict:
     # 2. Filter records that need processing
     to_process = []
     for record in records:
-        cells = record.get("cells", {})
+        cells = record.get("fields", {})
         inspection_complete = extract_select_name(cells.get(DISPATCH["巡检是否完成"]))
         closure_status = extract_select_name(cells.get(DISPATCH["工单是否闭环"]))
 
@@ -149,7 +149,7 @@ async def run_closure_check(db: Session) -> dict:
                 to_process.append({
                     "record_id": record.get("recordId") or record.get("record_id"),
                     "pts_order_id": pts_order_id,
-                    "cells": cells,
+                    "fields": cells,
                 })
 
     logger.info("Closure check: %d records need processing", len(to_process))
@@ -164,9 +164,9 @@ async def run_closure_check(db: Session) -> dict:
     for item in to_process:
         pts_order_id = item["pts_order_id"]
         record_id = item["record_id"]
-        cells = item["cells"]
-        customer = cells.get(DISPATCH["客户名称"], "")
-        report_attachments = cells.get(DISPATCH["巡检报告"])
+        fields = item["fields"]
+        customer = fields.get(DISPATCH["客户名称"], "")
+        report_attachments = fields.get(DISPATCH["巡检报告"])
 
         logger.info("Processing work order %s (%s)", pts_order_id, customer)
 
@@ -516,7 +516,7 @@ async def close_work_order_after_email(
     if not target_record:
         return {"success": False, "message": f"AITable 中未找到记录 {record_id}"}
 
-    cells = target_record.get("cells", {})
+    cells = target_record.get("fields", {})
     report_attachments = cells.get(DISPATCH["巡检报告"])
 
     # 3. Attempt closure

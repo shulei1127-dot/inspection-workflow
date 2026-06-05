@@ -122,7 +122,7 @@ async def run_monitor_poll(db: Session) -> dict:
         if not wo:
             continue
 
-        cells = record.get("cells", {})
+        cells = record.get("fields", {})
 
         # Sync AITable fields back to local
         _sync_from_aitable(wo, cells)
@@ -287,7 +287,7 @@ async def run_dispatch_monitor_poll(db: Session) -> dict:
         if not record_id:
             continue
 
-        cells = record.get("cells", {})
+        cells = record.get("fields", {})
 
         # Sync AITable fields back to local DB for dashboard consistency
         wo = db.query(WorkOrder).filter(WorkOrder.dt_record_id == record_id).first()
@@ -410,7 +410,7 @@ async def _lookup_dispatch_emails(customer_name: str | None) -> list[str]:
         )
         emails = []
         for record in records:
-            cells = record.get("cells", {})
+            cells = record.get("fields", {})
             rec_name = extract_text(cells.get(DISPATCH["客户名称"]))
             if rec_name != customer_name:
                 continue
@@ -464,7 +464,7 @@ async def _find_pts_url(db: Session, customer_name: str | None, cells: dict) -> 
             )
             if records:
                 for rec in records:
-                    rec_cells = rec.get("cells", {})
+                    rec_cells = rec.get("fields", {})
                     rec_name = extract_text(rec_cells.get(DISPATCH["客户名称"]))
                     if rec_name != customer_name:
                         continue
@@ -565,7 +565,7 @@ async def get_dispatch_pending(db: Session, count_only: bool = False) -> dict:
         if not record_id:
             continue
 
-        cells = record.get("cells", {})
+        cells = record.get("fields", {})
         supplier = extract_select_name(cells.get(DISPATCH["伙伴供应商"]))
         partner_manager = extract_engineer(cells.get(DISPATCH["伙伴负责人"]))
         engineer = extract_engineer(cells.get(DISPATCH["工程师"]))
@@ -626,7 +626,7 @@ async def trigger_manual_dispatch(db: Session, record_id: str) -> dict:
     if not target_record:
         return {"status": "error", "message": f"Record {record_id} not found in AITable"}
 
-    cells = target_record.get("cells", {})
+    cells = target_record.get("fields", {})
     supplier = extract_select_name(cells.get(DISPATCH["伙伴供应商"]))
     engineer = extract_engineer(cells.get(DISPATCH["工程师"]))
     customer_name = extract_text(cells.get(DISPATCH["客户名称"]))
@@ -716,7 +716,7 @@ async def get_email_pending(db: Session) -> dict:
         if not record_id:
             continue
 
-        cells = record.get("cells", {})
+        cells = record.get("fields", {})
         report_attachments = cells.get(DISPATCH["巡检报告"])
         email_sent = extract_select_name(cells.get(DISPATCH["邮件是否发送"]))
 
@@ -792,7 +792,7 @@ async def trigger_manual_email(db: Session, record_id: str, extra_emails: list[s
     if not target_record:
         return {"status": "error", "message": f"Record {record_id} not found in AITable"}
 
-    cells = target_record.get("cells", {})
+    cells = target_record.get("fields", {})
     customer_name = extract_text(cells.get(DISPATCH["客户名称"])) or ""
     product_name = extract_text(cells.get(DISPATCH["产品名称"])) or ""
     report_attachments = cells.get(DISPATCH["巡检报告"])

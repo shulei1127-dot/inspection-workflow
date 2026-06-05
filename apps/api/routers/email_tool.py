@@ -287,7 +287,7 @@ async def fetch_aitable_attachments(record_id: str):
     if not target:
         return {"success": False, "message": f"未找到记录 {record_id}"}
 
-    cells = target.get("cells", {})
+    cells = target.get("fields", {})
     report_attachments = cells.get(DISPATCH["巡检报告"])
     customer_name = extract_text(cells.get(DISPATCH["客户名称"])) or ""
     product_name = extract_text(cells.get(DISPATCH["产品名称"])) or ""
