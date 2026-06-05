@@ -119,11 +119,9 @@ async def run_sync(
                 # Check if data changed
                 if _data_changed(existing, raw):
                     _update_work_order(existing, raw)
-                    existing.dt_sync_status = "pending"
                     updated_count += 1
-                    pending_records.append(existing)
-                elif existing.dt_sync_status != "synced":
-                    # Data unchanged but AITable sync pending/failed
+                # 已推送到钉钉的工单不再重复推送，只在本地DB更新
+                if existing.dt_sync_status != "synced":
                     pending_records.append(existing)
                 else:
                     skipped_count += 1
@@ -343,19 +341,9 @@ async def _sync_to_aitable(db: Session, wo: WorkOrder, sync_month: str | None = 
     cells = _work_order_to_cells(wo)
 
     if wo.dt_record_id:
-        # Update existing record
-        result = await dingtalk_client.update_records([{
-            "recordId": wo.dt_record_id,
-            "cells": cells,
-        }], base_id=settings.dt_dispatch_base_id, table_id=settings.dt_dispatch_table_id)
-        if result is None or (isinstance(result, dict) and not result.get("data") and not result.get("updatedRecordIds")):
-            logger.warning("Update AITable record failed or record not found, will look up existing: %s", wo.dt_record_id)
-            wo.dt_record_id = None
-        else:
-            wo.dt_sync_status = "synced"
-            wo.dt_synced_at = datetime.now(timezone.utc)
-            wo.dt_synced_month = sync_month or current_month()
-            return
+        # 已推送到钉钉的记录不再更新，直接标记为已同步
+        wo.dt_sync_status = "synced"
+        return
 
     # No dt_record_id — check AITable for existing record with same PTS URL
     existing_id = None
