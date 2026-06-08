@@ -198,9 +198,11 @@ def _run_dispatch_monitor_job() -> None:
     result = {}
 
     try:
-        from services.monitor_service import run_dispatch_monitor_poll
+        from services.monitor_service import run_dispatch_monitor_poll, invalidate_all_caches
 
         with SessionLocal() as db:
+            # Clear AITable cache to ensure fresh data
+            invalidate_all_caches()
             result = asyncio.run(run_dispatch_monitor_poll(db))
             logger.info(
                 "Scheduled dispatch monitor poll completed: status=%s dispatch=%d failed=%d",
@@ -228,9 +230,11 @@ def _run_email_probe_job() -> None:
     result = {}
 
     try:
-        from services.monitor_service import get_email_pending
+        from services.monitor_service import get_email_pending, invalidate_all_caches
 
         with SessionLocal() as db:
+            # Always clear cache first to ensure fresh data from AITable
+            invalidate_all_caches()
             result = asyncio.run(get_email_pending(db))
             logger.info(
                 "Scheduled email probe completed: total=%d pending",
