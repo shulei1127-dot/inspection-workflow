@@ -517,15 +517,16 @@ async def send_email_from_pre_analysis(
 
     subject = f"【长亭科技巡检报告】- {customer_name}-{product_name}-{inspection_date}"
 
-    body = f"""尊敬的客户，您好，
+    # Convert summary \n to <br> for HTML display
+    summary_html = (summary or "").replace("\n", "<br>")
 
-非常感谢对长亭科技的信任！本司于 {inspection_date or '{时间}'} 对贵司的 {quantity or '{数量}'} 进行了一次全面的巡检，结果如下：
-
-{summary or '{巡检总结}'}
-
-详细巡检报告见附件，请查收！
-
-后续如有问题欢迎通过【长亭科技售后服务中心】微信服务号-【人工服务】联系我们～"""
+    body = f"""<div style="font-family: 'Microsoft YaHei', Arial, sans-serif; font-size: 14px; line-height: 1.8; color: #333;">
+<p>尊敬的客户，您好，</p>
+<p>非常感谢对长亭科技的信任！本司于 {inspection_date or '{时间}'} 对贵司的 {quantity or '{数量}'} 进行了一次全面的巡检，结果如下：</p>
+<p>{summary_html or '{巡检总结}'}</p>
+<p>详细巡检报告见附件，请查收！</p>
+<p>后续如有问题欢迎通过【长亭科技售后服务中心】微信服务号-【人工服务】联系我们～</p>
+</div>"""
 
     # 5. Send email
     from services.email_sender import send_email as _send_email
@@ -549,6 +550,7 @@ async def send_email_from_pre_analysis(
         body=body,
         attachments=attachments if attachments else None,
         cc_emails=",".join(cc_list),
+        body_type="html",
     )
 
     if not success:

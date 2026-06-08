@@ -88,15 +88,17 @@ def send_email(
     body: str,
     attachments: list[tuple[str, bytes]] | None = None,
     cc_emails: str = "",
+    body_type: str = "plain",
 ) -> tuple[bool, str]:
     """Send email via SMTP_SSL.
 
     Args:
         to_emails: List of recipient email addresses
         subject: Email subject
-        body: Email body (plain text)
+        body: Email body
         attachments: List of (filename, bytes) tuples
         cc_emails: Comma-separated CC addresses
+        body_type: "plain" or "html"
 
     Returns (success, message)
     """
@@ -117,7 +119,7 @@ def send_email(
             msg["Cc"] = cc_emails
         msg["Subject"] = Header(subject, "utf-8")
 
-        msg.attach(MIMEText(body, "plain", "utf-8"))
+        msg.attach(MIMEText(body, body_type, "utf-8"))
 
         if attachments:
             for attachment_name, attachment_bytes in attachments:
