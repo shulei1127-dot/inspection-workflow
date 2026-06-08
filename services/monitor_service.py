@@ -720,11 +720,12 @@ async def get_email_pending(db: Session) -> dict:
         report_attachments = cells.get(DISPATCH["巡检报告"])
         email_sent = extract_select_name(cells.get(DISPATCH["邮件是否发送"]))
 
-        # Check conditions: has report + not yet sent
+        # Check conditions: has report + not yet sent + not marked as "未上传"
         has_report = isinstance(report_attachments, list) and len(report_attachments) > 0
         not_sent = not (email_sent and email_sent.strip() == "是")
+        not_blocked = not (email_sent is not None and email_sent.strip() == "未上传")
 
-        if not (has_report and not_sent):
+        if not (has_report and not_sent and not_blocked):
             continue
 
         # Full data for display
@@ -799,6 +800,9 @@ async def trigger_manual_email(db: Session, record_id: str, extra_emails: list[s
     email_addresses_str = extract_text(cells.get(DISPATCH["报告发送邮箱"])) or ""
 
     # Validate conditions
+    email_sent_val = extract_select_name(cells.get(DISPATCH["邮件是否发送"]))
+    if email_sent_val and email_sent_val.strip() == "未上传":
+        return {"status": "error", "message": "巡检报告标记为\"未上传\"，不允许发送邮件"}
     if not isinstance(report_attachments, list) or len(report_attachments) == 0:
         return {"status": "error", "message": "巡检报告为空，无法发送邮件"}
 

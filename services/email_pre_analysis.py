@@ -388,6 +388,7 @@ async def refresh_aitable_fields_for_send(
         "sales_name": sales_name,
         "customer_name": customer_name,
         "product_name": product_name,
+        "email_sent_status": extract_select_name(cells.get(DISPATCH["邮件是否发送"])) or "",
     }
 
     # Persist refreshed fields
@@ -429,6 +430,11 @@ async def send_email_from_pre_analysis(
     refreshed = await refresh_aitable_fields_for_send(db, record_id)
     if "error" in refreshed:
         return {"status": "error", "message": f"刷新 AITable 字段失败: {refreshed['error']}"}
+
+    # Check if marked as "未上传" — do not send
+    email_sent_status = refreshed.get("email_sent_status", "")
+    if email_sent_status == "未上传":
+        return {"status": "error", "message": "巡检报告标记为\"未上传\"，不允许发送邮件"}
 
     settings = get_settings()
 
