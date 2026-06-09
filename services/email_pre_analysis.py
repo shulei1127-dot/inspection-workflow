@@ -506,21 +506,21 @@ async def preview_email_content(
         if any(kw in quantity for kw in _PRODUCT_KEYWORDS):
             qty_display = quantity
         else:
-            qty_display = f"{quantity}{product_name}"
+            qty_display = f"{quantity}{short_product or product_name}"
     elif product_name:
-        qty_display = product_name
+        qty_display = short_product or product_name
     else:
         qty_display = "相关设备"
 
     body = (
-        f"尊敬的客户，您好，\r\n"
-        f"\r\n"
-        f"非常感谢对长亭科技的信任！本司于 {inspection_date or '近日'} 对贵司的 {qty_display} 进行了一次全面的巡检，结果如下：\r\n"
-        f"\r\n"
-        f"{summary or '详见附件巡检报告。'}\r\n"
-        f"\r\n"
-        f"详细巡检报告见附件，请查收！\r\n"
-        f"\r\n"
+        f"尊敬的客户，您好，\n"
+        f"\n"
+        f"非常感谢对长亭科技的信任！本司于 {inspection_date or '近日'} 对贵司的 {qty_display} 进行了一次全面的巡检，结果如下：\n"
+        f"\n"
+        f"{summary or '详见附件巡检报告。'}\n"
+        f"\n"
+        f"详细巡检报告见附件，请查收！\n"
+        f"\n"
         f"后续如有问题欢迎通过【长亭科技售后服务中心】微信服务号-【人工服务】联系我们～"
     )
 
@@ -685,27 +685,27 @@ async def send_email_from_pre_analysis(
     date_display = (inspection_date or "近日").replace("-", ".")
     subject = f"【长亭科技巡检报告】{customer_name}{short_product}巡检报告-{date_display}"
 
-    # Build quantity display: "4台雷池" / "雷池" (no quantity)
+    # Build quantity display: "2台雷池" / "雷池" (no quantity)
     # If quantity already contains product names (e.g. "1台洞鉴、2个探针谛听"), use it directly
     if quantity:
         if any(kw in quantity for kw in _PRODUCT_KEYWORDS):
             qty_display = quantity
         else:
-            qty_display = f"{quantity}{product_name}"
+            qty_display = f"{quantity}{short_product or product_name}"
     elif product_name:
-        qty_display = product_name
+        qty_display = short_product or product_name
     else:
         qty_display = "相关设备"
 
     body = (
-        f"尊敬的客户，您好，\r\n"
-        f"\r\n"
-        f"非常感谢对长亭科技的信任！本司于 {inspection_date or '近日'} 对贵司的 {qty_display} 进行了一次全面的巡检，结果如下：\r\n"
-        f"\r\n"
-        f"{summary or '详见附件巡检报告。'}\r\n"
-        f"\r\n"
-        f"详细巡检报告见附件，请查收！\r\n"
-        f"\r\n"
+        f"尊敬的客户，您好，\n"
+        f"\n"
+        f"非常感谢对长亭科技的信任！本司于 {inspection_date or '近日'} 对贵司的 {qty_display} 进行了一次全面的巡检，结果如下：\n"
+        f"\n"
+        f"{summary or '详见附件巡检报告。'}\n"
+        f"\n"
+        f"详细巡检报告见附件，请查收！\n"
+        f"\n"
         f"后续如有问题欢迎通过【长亭科技售后服务中心】微信服务号-【人工服务】联系我们～"
     )
 
