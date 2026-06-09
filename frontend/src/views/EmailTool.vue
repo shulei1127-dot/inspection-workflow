@@ -543,8 +543,27 @@ function generateEmailContent() {
       .join('\n\n')
   }
 
+  // Short product name for subject: "下一代Web应用防火墙（雷池20系列）" → "雷池"
+  const productShortMap: Record<string, string> = {
+    '雷池': '雷池', '下一代Web应用防火墙': '雷池', '下一代 Web 应用防火墙': '雷池',
+    '洞鉴': '洞鉴', '牧云': '牧云', '云工作负载保护平台': '牧云',
+    '谛听': '谛听', '万象': '万象',
+  }
+  const productKeywords = ['雷池', '洞鉴', '谛听', '牧云', '万象']
+  let shortProduct = form.productName || ''
+  for (const kw of productKeywords) {
+    if (shortProduct.includes(kw)) { shortProduct = kw; break }
+  }
+  if (!productKeywords.includes(shortProduct)) {
+    for (const [prefix, short] of Object.entries(productShortMap)) {
+      if (shortProduct.startsWith(prefix) || shortProduct.includes(prefix)) { shortProduct = short; break }
+    }
+  }
+
+  const dateDisplay = (form.inspectionDate || '').replace(/-/g, '.')
+
   form.subject = form.customerName
-    ? `【长亭科技巡检报告】- ${form.customerName}-${form.productName}-${form.inspectionDate}`
+    ? `【长亭科技巡检报告】${form.customerName}${shortProduct}巡检报告-${dateDisplay}`
     : '【长亭科技巡检报告】'
 
   form.body = `尊敬的客户，您好，
@@ -667,7 +686,7 @@ function handleClear() {
   form.recipientEmails = ''
   form.ccEmails = ''
   form.subject = '【长亭科技巡检报告】'
-  form.body = `尊敬的客户，您好，\n\n非常感谢对长亭科技的信任！本司于 {时间} 对贵司的 {数量} {产品名称} 进行了一次全面的巡检，结果如下：\n\n{巡检总结}\n\n详细巡检报告见附件，请查收！\n\n后续如有问题欢迎通过【长亭科技售后服务中心】微信服务号-【人工服务】联系我们～`
+  form.body = `尊敬的客户，您好，\n\n非常感谢对长亭科技的信任！本司于 {时间} 对贵司的 {数量} 进行了一次全面的巡检，结果如下：\n\n{巡检总结}\n\n详细巡检报告见附件，请查收！\n\n后续如有问题欢迎通过【长亭科技售后服务中心】微信服务号-【人工服务】联系我们～`
   form.summaries = []
   form.fileIds = []
   form.salesName = ''
