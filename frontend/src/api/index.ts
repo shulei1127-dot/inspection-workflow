@@ -100,6 +100,9 @@ export const sendDirectEmail = (data: { record_id: string; extra_emails?: string
     body: new URLSearchParams(data as any).toString(),
   }).then(r => r.json())
 
+export const previewEmailContent = (recordId: string) =>
+  fetchJson(`/api/email-tool/preview/${recordId}`)
+
 export const triggerClosureCheck = () =>
   postJson('/api/monitor/closure-check')
 

@@ -399,6 +399,137 @@ async def refresh_aitable_fields_for_send(
     return refreshed_fields
 
 
+async def preview_email_content(
+    db: Session,
+    record_id: str,
+    extra_emails: list[str] | None = None,
+) -> dict:
+    """Preview email content without actually sending.
+
+    Returns the composed subject, body, recipients, CC, and attachment filenames
+    so the frontend can display a preview for manual confirmation.
+    """
+    analysis = db.query(EmailPreAnalysis).filter(
+        EmailPreAnalysis.aitable_record_id == record_id,
+    ).first()
+
+    if not analysis:
+        return {"status": "error", "message": "未找到预分析记录，请先运行预分析"}
+
+    if analysis.analysis_status != "success":
+        return {"status": "error", "message": f"预分析状态为 {analysis.analysis_status}，无法预览"}
+
+    # Refresh AITable fields
+    refreshed = await refresh_aitable_fields_for_send(db, record_id)
+    if "error" in refreshed:
+        return {"status": "error", "message": f"刷新 AITable 字段失败: {refreshed['error']}"}
+
+    email_sent_status = refreshed.get("email_sent_status", "")
+    if email_sent_status == "未上传":
+        return {"status": "error", "message": "巡检报告标记为\"未上传\"，不允许发送邮件"}
+
+    # Build recipient list
+    email_list = []
+    if extra_emails:
+        email_list = extra_emails
+    elif refreshed.get("report_emails"):
+        email_list = refreshed["report_emails"]
+    elif analysis.emails:
+        email_list = [e.strip() for e in analysis.emails.split(",") if e.strip() and "@" in e]
+
+    # Build CC list
+    default_cc = ["jia.chen@chaitin.com", "kai.wu@chaitin.com", "lei.shu@chaitin.com"]
+    cc_list = list(default_cc)
+    sales_name = refreshed.get("sales_name", "")
+    if sales_name:
+        try:
+            from services.email_sender import _get_name_pinyin
+            sales_email = _get_name_pinyin(sales_name)
+            if sales_email and sales_email not in cc_list:
+                cc_list.append(sales_email)
+        except Exception:
+            pass
+
+    # Compose email content (same logic as send_email_from_pre_analysis)
+    customer_name = refreshed.get("customer_name") or analysis.customer_name or ""
+    product_name = refreshed.get("product_name") or analysis.product_name or ""
+    inspection_date = analysis.inspection_date or ""
+    quantity = analysis.quantity or ""
+
+    summaries = analysis.summaries
+    if summaries and len(summaries) > 1:
+        summary = "\n\n".join(
+            f"【{s['product']}】\n{s['summary']}" for s in summaries if s.get("summary")
+        )
+    elif summaries and len(summaries) == 1:
+        summary = summaries[0].get("summary", "") or analysis.summary or ""
+    else:
+        summary = analysis.summary or ""
+
+    subject = f"【长亭科技巡检报告】- {customer_name}-{product_name}-{inspection_date}"
+
+    if quantity:
+        _product_keywords = ["雷池", "洞鉴", "谛听", "牧云", "万象"]
+        if any(kw in quantity for kw in _product_keywords):
+            qty_display = quantity
+        else:
+            qty_display = f"{quantity}{product_name}"
+    elif product_name:
+        qty_display = product_name
+    else:
+        qty_display = "相关设备"
+
+    body = f"""尊敬的客户，您好，
+
+非常感谢对长亭科技的信任！本司于 {inspection_date or '近日'} 对贵司的 {qty_display} 进行了一次全面的巡检，结果如下：
+
+{summary or '详见附件巡检报告。'}
+
+详细巡检报告见附件，请查收！
+
+后续如有问题欢迎通过【长亭科技售后服务中心】微信服务号-【人工服务】联系我们～"""
+
+    # Get attachment filenames from AITable
+    from core.config import get_settings
+    from services import dingtalk_client
+
+    settings = get_settings()
+    attachment_filenames = []
+    try:
+        records = await dingtalk_client.query_records(
+            limit=100,
+            base_id=settings.dt_dispatch_base_id,
+            table_id=settings.dt_dispatch_table_id,
+            fetch_all=True,
+        )
+        for record in records:
+            rid = record.get("recordId") or record.get("record_id", "")
+            if rid == record_id:
+                cells = record.get("fields", {})
+                report_attachments = cells.get(DISPATCH["巡检报告"])
+                if isinstance(report_attachments, list):
+                    for att in report_attachments:
+                        if isinstance(att, dict):
+                            attachment_filenames.append(att.get("filename", "report.pdf"))
+                break
+    except Exception as e:
+        logger.warning("Failed to fetch attachment filenames for preview: %s", e)
+
+    return {
+        "status": "success",
+        "subject": subject,
+        "body": body,
+        "to_emails": email_list,
+        "cc_emails": cc_list,
+        "attachments": attachment_filenames,
+        "customer_name": customer_name,
+        "product_name": product_name,
+        "inspection_date": inspection_date,
+        "quantity": qty_display,
+        "sales_name": sales_name,
+    }
+
+
 async def send_email_from_pre_analysis(
     db: Session,
     record_id: str,

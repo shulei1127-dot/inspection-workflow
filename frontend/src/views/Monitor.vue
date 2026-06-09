@@ -172,10 +172,9 @@
               v-if="preAnalysisMap[item.record_id]?.analysis_status === 'success'"
               type="success"
               size="small"
-              :loading="directSendingMap[item.record_id]"
-              @click="handleDirectSend(item)"
+              @click="handlePreviewSend(item)"
             >
-              {{ directSendingMap[item.record_id] ? '发送中...' : '直接发送' }}
+              预览发送
             </el-button>
             <el-button
               type="primary"
@@ -266,9 +265,62 @@
         <el-button
           v-if="paDetailData?.analysis_status === 'success'"
           type="success"
-          @click="handleDirectSend(paDetailItem); paDetailVisible = false"
+          @click="handlePreviewSend(paDetailItem); paDetailVisible = false"
         >
-          直接发送
+          预览发送
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Email preview & confirm dialog -->
+    <el-dialog
+      v-model="emailPreviewVisible"
+      title="邮件发送预览"
+      width="680px"
+      :close-on-click-modal="false"
+    >
+      <div v-if="emailPreviewLoading" v-loading="true" style="height: 100px"></div>
+      <div v-else-if="emailPreviewData && emailPreviewData.status === 'error'" style="color: #f56c6c">
+        {{ emailPreviewData.message }}
+      </div>
+      <div v-else-if="emailPreviewData" style="font-size: 14px; line-height: 1.8">
+        <el-descriptions :column="1" border size="small">
+          <el-descriptions-item label="客户名称">{{ emailPreviewData.customer_name }}</el-descriptions-item>
+          <el-descriptions-item label="产品名称">{{ emailPreviewData.product_name }}</el-descriptions-item>
+          <el-descriptions-item label="巡检日期">{{ emailPreviewData.inspection_date }}</el-descriptions-item>
+          <el-descriptions-item label="数量">{{ emailPreviewData.quantity }}</el-descriptions-item>
+          <el-descriptions-item label="销售">{{ emailPreviewData.sales_name || '-' }}</el-descriptions-item>
+        </el-descriptions>
+        <div style="margin-top: 16px">
+          <div style="font-weight: bold; margin-bottom: 8px; color: #333">邮件主题</div>
+          <div style="background: #f5f7fa; padding: 8px 12px; border-radius: 4px">{{ emailPreviewData.subject }}</div>
+        </div>
+        <div style="margin-top: 12px">
+          <div style="font-weight: bold; margin-bottom: 8px; color: #333">收件人</div>
+          <div style="background: #f5f7fa; padding: 8px 12px; border-radius: 4px">{{ (emailPreviewData.to_emails || []).join(', ') || '（无收件人）' }}</div>
+        </div>
+        <div style="margin-top: 12px">
+          <div style="font-weight: bold; margin-bottom: 8px; color: #333">抄送人</div>
+          <div style="background: #f5f7fa; padding: 8px 12px; border-radius: 4px">{{ (emailPreviewData.cc_emails || []).join(', ') }}</div>
+        </div>
+        <div style="margin-top: 12px">
+          <div style="font-weight: bold; margin-bottom: 8px; color: #333">附件</div>
+          <div style="background: #f5f7fa; padding: 8px 12px; border-radius: 4px">{{ (emailPreviewData.attachments || []).join('、') || '-' }}</div>
+        </div>
+        <div style="margin-top: 12px">
+          <div style="font-weight: bold; margin-bottom: 8px; color: #333">邮件正文</div>
+          <div style="background: #f5f7fa; padding: 12px; border-radius: 4px; white-space: pre-wrap; max-height: 300px; overflow-y: auto">{{ emailPreviewData.body }}</div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="emailPreviewVisible = false">取消</el-button>
+        <el-button
+          type="success"
+          :loading="directSendingMap[emailPreviewItem?.record_id]"
+          :disabled="!emailPreviewData || emailPreviewData.status === 'error' || (emailPreviewData.to_emails || []).length === 0"
+          @click="handleConfirmSend"
+        >
+          确认发送
         </el-button>
       </template>
     </el-dialog>
@@ -278,7 +330,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getDispatchPending, manualDispatch, getEmailPending, getTriggerLogs, getPreAnalysisStatus, runPreAnalysis, sendDirectEmail } from '../api'
+import { getDispatchPending, manualDispatch, getEmailPending, getTriggerLogs, getPreAnalysisStatus, runPreAnalysis, sendDirectEmail, previewEmailContent } from '../api'
 import { useRouter } from 'vue-router'
 
 const probing = ref(false)
@@ -296,6 +348,11 @@ const directSendingMap = reactive<Record<string, boolean>>({})
 const paDetailVisible = ref(false)
 const paDetailData = ref<any>(null)
 const paDetailItem = ref<any>(null)
+
+const emailPreviewVisible = ref(false)
+const emailPreviewLoading = ref(false)
+const emailPreviewData = ref<any>(null)
+const emailPreviewItem = ref<any>(null)
 
 const router = useRouter()
 
@@ -442,22 +499,34 @@ async function handleRunPreAnalysis() {
   }
 }
 
-async function handleDirectSend(row: any) {
+async function handlePreviewSend(row: any) {
   const pa = preAnalysisMap[row.record_id]
   if (!pa || pa.analysis_status !== 'success') {
-    ElMessage.warning('该记录未预分析，无法直接发送')
+    ElMessage.warning('该记录未预分析，无法发送邮件')
     return
   }
 
+  emailPreviewItem.value = row
+  emailPreviewLoading.value = true
+  emailPreviewVisible.value = true
+  emailPreviewData.value = null
+
   try {
-    await ElMessageBox.confirm(
-      `确认直接发送邮件到 ${row.email_address_str || pa.emails || '（将使用AI提取的邮箱）'}？`,
-      '直接发送确认',
-      { confirmButtonText: '发送', cancelButtonText: '取消', type: 'warning' },
-    )
-  } catch {
-    return  // User cancelled
+    const res = await previewEmailContent(row.record_id)
+    emailPreviewData.value = res
+    if (res.status === 'error') {
+      ElMessage.warning(res.message)
+    }
+  } catch (e: any) {
+    emailPreviewData.value = { status: 'error', message: '预览加载失败: ' + e.message }
+  } finally {
+    emailPreviewLoading.value = false
   }
+}
+
+async function handleConfirmSend() {
+  const row = emailPreviewItem.value
+  if (!row) return
 
   directSendingMap[row.record_id] = true
   try {
@@ -474,6 +543,7 @@ async function handleDirectSend(row: any) {
           ElMessage.warning('工单闭环未成功: ' + res.closure.message)
         }
       }
+      emailPreviewVisible.value = false
       // Refresh data
       loadEmailPending()
       loadPreAnalysis()

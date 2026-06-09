@@ -624,6 +624,18 @@ async def trigger_pre_analysis(
     return {"status": "success", "result": result}
 
 
+@router.get("/api/email-tool/preview/{record_id}")
+async def preview_email(record_id: str, db: Session = Depends(get_db)):
+    """Preview email content for a pre-analyzed record without sending.
+
+    Returns composed subject, body, recipients, CC, and attachment filenames.
+    """
+    from services.email_pre_analysis import preview_email_content
+
+    result = await preview_email_content(db, record_id)
+    return result
+
+
 @router.post("/api/email-tool/send-direct")
 async def send_email_direct(
     record_id: str = Form(...),

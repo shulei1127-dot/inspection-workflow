@@ -342,7 +342,7 @@ def _run_email_pre_analysis_job() -> None:
         from services.email_pre_analysis import run_email_pre_analysis
 
         with SessionLocal() as db:
-            result = asyncio.run(run_email_pre_analysis(db, auto_send=True))
+            result = asyncio.run(run_email_pre_analysis(db, auto_send=False))
             logger.info(
                 "Scheduled email pre-analysis completed: scanned=%d new=%d success=%d failed=%d skipped=%d sent=%d send_failed=%d",
                 result.get("scanned", 0),
