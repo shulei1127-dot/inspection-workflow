@@ -517,11 +517,19 @@ async def send_email_from_pre_analysis(
 
     subject = f"【长亭科技巡检报告】- {customer_name}-{product_name}-{inspection_date}"
 
+        # Build quantity display: "4台雷池" / "雷池" (no quantity) / "{数量}" (fallback)
+    if quantity:
+        qty_display = f"{quantity}{product_name}"
+    elif product_name:
+        qty_display = product_name
+    else:
+        qty_display = "相关设备"
+
     body = f"""尊敬的客户，您好，
 
-非常感谢对长亭科技的信任！本司于 {inspection_date or '{时间}'} 对贵司的 {quantity or '{数量}'} 进行了一次全面的巡检，结果如下：
+非常感谢对长亭科技的信任！本司于 {inspection_date or '近日'} 对贵司的 {qty_display} 进行了一次全面的巡检，结果如下：
 
-{summary or '{巡检总结}'}
+{summary or '详见附件巡检报告。'}
 
 详细巡检报告见附件，请查收！
 
