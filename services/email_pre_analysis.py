@@ -517,9 +517,15 @@ async def send_email_from_pre_analysis(
 
     subject = f"【长亭科技巡检报告】- {customer_name}-{product_name}-{inspection_date}"
 
-        # Build quantity display: "4台雷池" / "雷池" (no quantity) / "{数量}" (fallback)
+    # Build quantity display: "4台雷池" / "雷池" (no quantity)
+    # If quantity already contains product names (e.g. "1台洞鉴、2个探针谛听"), use it directly
     if quantity:
-        qty_display = f"{quantity}{product_name}"
+        # Check if quantity already mentions product keywords (雷池/洞鉴/谛听/牧云/万象)
+        _product_keywords = ["雷池", "洞鉴", "谛听", "牧云", "万象"]
+        if any(kw in quantity for kw in _product_keywords):
+            qty_display = quantity
+        else:
+            qty_display = f"{quantity}{product_name}"
     elif product_name:
         qty_display = product_name
     else:
