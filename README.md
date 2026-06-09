@@ -2,14 +2,63 @@
 
 长亭科技巡检工单全生命周期自动化系统，覆盖同步、派单、邮件、闭环四大环节。
 
-## 功能概览
+## 服务分工
 
-| 环节 | 说明 |
-|------|------|
-| **同步** | 从 PTS 拉取巡检工单 → 存入 PostgreSQL → 推送至钉钉 AITable |
-| **派单** | 监控 AITable 记录，满足条件时自动触发云集外包平台派单 |
-| **邮件** | 检测 AITable 巡检报告附件，AI 提取信息后自动发送邮件给客户 |
-| **闭环** | 巡检完成后自动在 PTS 中推进阶段、闭环工单 |
+### AI 自动执行
+
+| # | 任务 | 执行周期 | 说明 |
+|---|------|---------|------|
+| 1 | PTS 工单拉取同步 | 工作日 16:00 | 自动从 PTS 拉取新增满足条件的工单，写入钉钉 AITable 数据表，并自动调整工单计划完成时间到当月末 |
+| 2 | 云集定时探测 + 自动派单 | 工作日 10/12/14/16/18 点 | 轮询钉钉数据表，满足条件时自动创建云集订单并回写订单编号到钉钉数据表 |
+| 3 | 待发送邮件报告探测 | 每 2 小时 | 主动探测钉钉数据表，将邮件待发送数据展示到前端页面 |
+| 4 | 待发送邮件报告预分析 | 工作日 10:30/14:30/16:30/18:30 | AI 提取钉钉数据表中邮件未发送的巡检报告信息（客户名、产品名、数量、邮箱、总结等），存储预分析结果供人工审核 |
+| 5 | PTS 工单闭环检查 | 工作日 10:00 | 自动检测钉钉数据表内巡检已完成、工单未闭环的数据，自动推进 PTS 工单阶段完成闭环 |
+| 6 | 云集 Cookie 保活 | 每 3 小时 | 自动访问云集页面保持 Session 有效，过期时触发钉钉告警 |
+| 7 | 钉钉机器人信息推送 | 随各任务触发 | 将定时任务的执行情况自动推送到钉钉群 |
+
+> **工作日判定**：使用 `chinesecalendar` 库识别中国法定节假日和调休安排，非工作日自动跳过定时任务。
+
+### 售后负责人执行
+
+1. **确认客户当月是否需要执行巡检**
+   - **现场巡检：**
+     - 是：同步客户现场地址、联系方式、邮箱等信息到钉钉数据表，随即在钉钉数据表选择伙伴供应商。等待伙伴的负责人确认工程师后，自动拉钉钉群
+     - 否：钉钉数据表巡检方式标记为延期巡检，手动修改对应工单的计划完成时间
+   - **远程巡检：**
+     - 是：约定远程巡检时间，填写进钉钉数据表
+     - 否：钉钉数据表巡检方式标记为延期巡检，手动修改对应工单的计划完成时间
+2. **审核邮件发送内容** — 在前端页面预览邮件正文、收件人、附件等信息，确认无误后人工点击发送
+3. **工单自动闭环失败时** — 人工闭环巡检工单并上传巡检报告
+
+### 伙伴工程师执行
+
+1. 伙伴工程师主动联系客户确认好时间后，同步到钉钉数据表
+2. 生成 Word 巡检报告，群内审核无误后，上传 PDF 巡检报告到钉钉数据表
+3. 系统预分析后，由售后负责人审核邮件内容并确认发送
+
+---
+
+## 邮件发送流程
+
+```
+上传PDF到钉钉数据表
+        │
+        ▼
+定时预分析（AI提取客户名/产品名/数量/邮箱/总结）
+        │
+        ▼
+前端展示预分析结果 ──→ 售后负责人点击"预览发送"
+        │
+        ▼
+展示邮件完整内容（主题/正文/收件人/抄送/附件）
+        │
+        ▼
+确认无误 ──→ 点击"确认发送" ──→ 邮件发出 ──→ 自动闭环工单
+```
+
+> 邮件不会自动发送给客户，必须经过人工审核确认后才会发出。
+
+---
 
 ## 技术栈
 
@@ -95,52 +144,57 @@ uvicorn apps.api.main:app --host 0.0.0.0 --port 8100
 
 访问 `http://localhost:8100` 即可使用。
 
-## 定时任务
+## 定时任务配置
 
-| 任务 | 时间 | 功能 |
-|------|------|------|
-| PTS→钉钉同步 | 每天 16:00 | 拉取 PTS 工单并推送 AITable |
-| 派单轮询 | 每 5 分钟 | 检测派单条件 |
-| 邮件待发送探测 | 每 2 小时 | 刷新邮件待发送缓存 |
-| PTS 闭环检查 | 每天 10:00 | 同步闭环状态并执行闭环 |
-| 云集 Cookie 保活 | 每 3 小时 | 保持云集 Session 有效 |
-
-> 默认 `AUTO_DISPATCH_ENABLED=false`、`AUTO_EMAIL_ENABLED=false`，定时任务仅做检测，不自动触发。
+| 任务 | Cron 表达式 | 环境变量 | 说明 |
+|------|------------|---------|------|
+| PTS→钉钉同步 | `0 16 * * *` | `SYNC_CRON` | 拉取 PTS 工单并推送 AITable |
+| 派单轮询 | `0 10,12,14,16,18 * * 1-5` | `DT_DISPATCH_BASE_ID` | 工作日检测派单条件并自动派单 |
+| 邮件待发送探测 | `0 */2 * * *` | `EMAIL_PROBE_CRON` | 刷新邮件待发送缓存 |
+| 邮件预分析 | `30 10,14,16,18 * * 1-5` | `EMAIL_PRE_ANALYSIS_ENABLED` | 工作日 AI 提取巡检报告信息 |
+| PTS 闭环检查 | `0 10 * * *` | `CLOSURE_CHECK_CRON` | 同步闭环状态并执行闭环 |
+| 云集 Cookie 保活 | 每 3 小时 | `YUNJI_SESSION_COOKIE` | 保持云集 Session 有效 |
 
 ## API 速览
 
 ```
-POST /api/sync/run                 # 从 PTS 拉取工单
-POST /api/sync/push                # 推送到 AITable
-GET  /api/monitor/dispatch-pending # 查看待派单记录
-POST /api/monitor/dispatch/{id}    # 手动派单
-GET  /api/monitor/email-pending    # 查看待发邮件记录
-POST /api/monitor/send-email/{id}  # 手动发送邮件
-POST /api/monitor/closure-check    # 触发闭环检查
-GET  /api/work-orders              # 工单列表
-GET  /api/statistics/overview      # 统计概览
-WS   /api/ws                       # 实时事件推送
+POST /api/sync/run                          # 从 PTS 拉取工单
+POST /api/sync/push                         # 推送到 AITable
+GET  /api/monitor/dispatch-pending          # 查看待派单记录
+POST /api/monitor/dispatch/{id}             # 手动派单
+GET  /api/monitor/email-pending             # 查看待发邮件记录
+POST /api/monitor/send-email/{id}           # 手动发送邮件
+POST /api/monitor/closure-check             # 触发闭环检查
+GET  /api/work-orders                       # 工单列表
+GET  /api/statistics/overview               # 统计概览
+GET  /api/email-tool/pre-analysis           # 获取预分析结果
+GET  /api/email-tool/preview/{record_id}    # 邮件内容预览
+POST /api/email-tool/send-direct            # 确认发送邮件
+WS   /api/ws                                # 实时事件推送
 ```
 
-## 部署（systemd）
+## 部署（Docker Compose）
 
 ```bash
-# 使用部署脚本
-sudo bash deploy.sh
+# 构建并启动
+docker compose up -d
 
-# 或手动管理
-sudo systemctl start inspection-workflow
-sudo systemctl status inspection-workflow
-sudo journalctl -u inspection-workflow -f
+# 查看日志
+docker compose logs -f app
+
+# 重新构建部署
+docker compose build app && docker compose up -d app
 ```
 
 ## 注意事项
 
 - AITable singleSelect 字段写入时必须使用**中文显示名**，不能用 option ID
-- 云集 Cookie 需定期保活，过期后需手动更新 `.env` 中的 `YUNJI_SESSION_COOKIE`
+- 云集 Cookie 需定期保活，过期后需手动更新 `.env` 中的 `YUNJI_SESSION_COOKIE` 并重启服务
 - PTS Session Cookie 用于 Playwright 自动化（文件上传、工单闭环），过期后需手动更新
 - 完成阶段的工单（审核工单、已闭环）会自动从本地 DB 和 AITable 中删除
 - 一个 AITable 记录可能含多个 PDF 附件，系统会独立提取后合并（产品名顿号拼接、总结按产品分段）
+- 邮件标记为"未上传"时，系统不会触发邮件发送，需客户上传报告后修改字段值
+- 已推送到钉钉的工单不会重复推送，只在本地数据库更新
 
 ## License
 
