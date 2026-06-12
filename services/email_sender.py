@@ -25,9 +25,22 @@ def _get_name_pinyin(name: str) -> str:
     """Convert Chinese name to pinyin email format: 舒磊 -> lei.shu@chaitin.com, 杨振兴 -> zhenxing.yang@chaitin.com"""
     try:
         from pypinyin import pinyin, Style
+        # Common surname multi-sound corrections: pypinyin defaults to wrong pronunciation
+        _SURNAME_CORRECTIONS = {
+            "单": "shan",  # 常见姓氏读音"shàn"，pypinyin默认误读为"dān"
+            "曾": "zeng",  # 常见姓氏读音"zēng"，部分场景误读为"ceng"
+            "解": "xie",   # 常见姓氏读音"xiè"
+            "查": "zha",   # 常见姓氏读音"zhā"
+            "覃": "qin",   # 常见姓氏读音"qín"
+            "盖": "ge",    # 常见姓氏读音"gě"
+        }
         parts = pinyin(name, style=Style.NORMAL)
         if len(parts) >= 2:
             surname = parts[0][0]
+            # Correct surname pronunciation if needed
+            first_char = name[0]
+            if first_char in _SURNAME_CORRECTIONS:
+                surname = _SURNAME_CORRECTIONS[first_char]
             given = "".join(p[0] for p in parts[1:])
             return f"{given}.{surname}@chaitin.com"
         elif len(parts) == 1:
