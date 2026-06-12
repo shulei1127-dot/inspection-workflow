@@ -778,9 +778,6 @@ async def send_email_from_pre_analysis(
     if not success:
         return {"status": "failed", "message": message}
 
-    # Record in send history
-    _record_send_history(customer_name, product_name, email_list, len(attachments), True)
-
     # 6. Post-send: write back AITable, auto-closure, update WorkOrder
     from services.monitor_service import _write_back_email_sent, _invalidate_email_cache, _invalidate_aitable_cache
 
