@@ -125,6 +125,11 @@ def send_email(
         return False, "SMTP 配置不完整"
 
     try:
+        # Clean email addresses: strip whitespace and remove any embedded newlines
+        to_emails = [e.replace("\n", "").replace("\r", "").strip() for e in to_emails if e and "@" in e]
+        if not to_emails:
+            return False, "收件人邮箱列表为空"
+
         msg = MIMEMultipart()
         msg["From"] = formataddr((str(Header("长亭科技", "utf-8")), sender_email))
         msg["To"] = ", ".join(to_emails)

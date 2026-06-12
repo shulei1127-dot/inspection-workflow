@@ -452,7 +452,7 @@ async def refresh_aitable_fields_for_send(
     # Parse email list
     email_list = []
     if report_email:
-        for addr in report_email.replace("、", ",").replace("；", ",").replace("，", ",").split(","):
+        for addr in report_email.replace("\n", ",").replace("\r", "").replace("、", ",").replace("；", ",").replace("，", ",").split(","):
             addr = addr.strip()
             if addr and "@" in addr:
                 email_list.append(addr)
@@ -509,7 +509,7 @@ async def preview_email_content(
     elif refreshed.get("report_emails"):
         email_list = refreshed["report_emails"]
     elif analysis.emails:
-        email_list = [e.strip() for e in analysis.emails.split(",") if e.strip() and "@" in e]
+        email_list = [e.replace("\n", "").replace("\r", "").strip() for e in analysis.emails.replace("、", ",").replace("；", ",").replace("，", ",").split(",") if e.strip() and "@" in e]
 
     # Build CC list
     default_cc = ["jia.chen@chaitin.com", "kai.wu@chaitin.com", "lei.shu@chaitin.com"]
@@ -653,7 +653,7 @@ async def send_email_from_pre_analysis(
     elif refreshed.get("report_emails"):
         email_list = refreshed["report_emails"]
     elif analysis.emails:
-        email_list = [e.strip() for e in analysis.emails.split(",") if e.strip() and "@" in e]
+        email_list = [e.replace("\n", "").replace("\r", "").strip() for e in analysis.emails.replace("、", ",").replace("；", ",").replace("，", ",").split(",") if e.strip() and "@" in e]
 
     if not email_list:
         return {"status": "error", "message": "客户邮箱为空，请先填写收件人邮箱"}
