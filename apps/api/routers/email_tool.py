@@ -624,6 +624,29 @@ async def trigger_pre_analysis(
     return {"status": "success", "result": result}
 
 
+@router.post("/api/email-tool/pre-analysis/re-analyze/{record_id}")
+async def re_analyze_record(record_id: str, db: Session = Depends(get_db)):
+    """Delete existing pre-analysis and re-analyze a single record.
+
+    Used when a PDF is re-uploaded and needs fresh AI extraction.
+    """
+    from models.email_pre_analysis import EmailPreAnalysis
+
+    # Delete existing record
+    existing = db.query(EmailPreAnalysis).filter(
+        EmailPreAnalysis.aitable_record_id == record_id,
+    ).first()
+    if existing:
+        db.delete(existing)
+        db.commit()
+
+    # Re-run pre-analysis (will pick up the deleted record as new)
+    from services.email_pre_analysis import run_email_pre_analysis
+
+    result = await run_email_pre_analysis(db, auto_send=False)
+    return {"status": "success", "result": result}
+
+
 @router.get("/api/email-tool/preview/{record_id}")
 async def preview_email(record_id: str, db: Session = Depends(get_db)):
     """Preview email content for a pre-analyzed record without sending.

@@ -93,6 +93,9 @@ export const getPreAnalysisStatus = () =>
 export const runPreAnalysis = () =>
   fetch('/api/email-tool/pre-analysis/run', { method: 'POST' }).then(r => r.json())
 
+export const reAnalyzeRecord = (recordId: string) =>
+  fetch(`/api/email-tool/pre-analysis/re-analyze/${recordId}`, { method: 'POST' }).then(r => r.json())
+
 export const sendDirectEmail = (data: { record_id: string; extra_emails?: string }) =>
   fetch('/api/email-tool/send-direct', {
     method: 'POST',

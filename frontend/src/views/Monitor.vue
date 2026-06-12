@@ -170,6 +170,15 @@
           <div class="email-card-footer">
             <el-button
               v-if="preAnalysisMap[item.record_id]?.analysis_status === 'success'"
+              type="warning"
+              size="small"
+              :loading="reAnalyzingMap[item.record_id]"
+              @click="handleReAnalyze(item)"
+            >
+              {{ reAnalyzingMap[item.record_id] ? '重新分析中...' : '重新分析' }}
+            </el-button>
+            <el-button
+              v-if="preAnalysisMap[item.record_id]?.analysis_status === 'success'"
               type="success"
               size="small"
               @click="handlePreviewSend(item)"
@@ -261,6 +270,12 @@
       </div>
       <template #footer>
         <el-button @click="paDetailVisible = false">关闭</el-button>
+        <el-button
+          type="warning"
+          @click="handleReAnalyze(paDetailItem); paDetailVisible = false"
+        >
+          重新分析
+        </el-button>
         <el-button type="primary" @click="handleSendEmail(paDetailItem); paDetailVisible = false">手动调整</el-button>
         <el-button
           v-if="paDetailData?.analysis_status === 'success'"
@@ -330,7 +345,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getDispatchPending, manualDispatch, getEmailPending, getTriggerLogs, getPreAnalysisStatus, runPreAnalysis, sendDirectEmail, previewEmailContent } from '../api'
+import { getDispatchPending, manualDispatch, getEmailPending, getTriggerLogs, getPreAnalysisStatus, runPreAnalysis, reAnalyzeRecord, sendDirectEmail, previewEmailContent } from '../api'
 import { useRouter } from 'vue-router'
 
 const probing = ref(false)
@@ -345,6 +360,7 @@ const emailLoading = ref(false)
 const preAnalysisMap = reactive<Record<string, any>>({})
 const runningPreAnalysis = ref(false)
 const directSendingMap = reactive<Record<string, boolean>>({})
+const reAnalyzingMap = reactive<Record<string, boolean>>({})
 const paDetailVisible = ref(false)
 const paDetailData = ref<any>(null)
 const paDetailItem = ref<any>(null)
@@ -464,6 +480,34 @@ function showPreAnalysisDetail(item: any) {
   paDetailItem.value = item
   paDetailData.value = pa
   paDetailVisible.value = true
+}
+
+async function handleReAnalyze(row: any) {
+  try {
+    await ElMessageBox.confirm(
+      '确认重新分析？将删除旧的预分析结果，重新下载PDF并AI提取。',
+      '重新分析确认',
+      { confirmButtonText: '确认', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+
+  reAnalyzingMap[row.record_id] = true
+  try {
+    const res = await reAnalyzeRecord(row.record_id)
+    const result = res.result || {}
+    if (result.success > 0) {
+      ElMessage.success(`重新分析完成`)
+    } else {
+      ElMessage.warning(`重新分析未成功: 扫描${result.scanned}条，无新分析`)
+    }
+    await loadPreAnalysis()
+  } catch (e: any) {
+    ElMessage.error('重新分析失败: ' + e.message)
+  } finally {
+    reAnalyzingMap[row.record_id] = false
+  }
 }
 
 async function loadPreAnalysis() {
