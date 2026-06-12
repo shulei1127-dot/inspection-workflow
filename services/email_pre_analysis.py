@@ -89,6 +89,9 @@ def _merge_multi_report_results(ai_infos: list[dict]) -> dict:
         info = ai_infos[0]
         product = info.get("product_name", "产品")
         summary = info.get("summary", "")
+        # AI may return summary as a list of strings — join with newlines
+        if isinstance(summary, list):
+            summary = "\n".join(str(s) for s in summary if s)
         return {
             "customer_name": info.get("customer_name", ""),
             "product_name": product,
@@ -99,13 +102,21 @@ def _merge_multi_report_results(ai_infos: list[dict]) -> dict:
         }
 
     # Multiple reports: merge with same logic as Streamlit
+    # Filter out non-report PDFs (e.g. syslog guides) that have no summary and no date
+    valid_infos = [
+        info for info in ai_infos
+        if info.get("summary") or info.get("inspection_date") or info.get("customer_name")
+    ]
+    if not valid_infos:
+        valid_infos = ai_infos  # Fallback: use all if none match
+
     customer_name = ""
     product_names = []
     products_with_quantity = []
     all_emails = []
     summaries = []
 
-    for info in ai_infos:
+    for info in valid_infos:
         if not customer_name and info.get("customer_name"):
             customer_name = info["customer_name"]
 
@@ -122,9 +133,13 @@ def _merge_multi_report_results(ai_infos: list[dict]) -> dict:
         if info.get("emails"):
             all_emails.extend(info["emails"])
 
+        s = info.get("summary", "")
+        # AI may return summary as a list of strings — join with newlines
+        if isinstance(s, list):
+            s = "\n".join(str(item) for item in s if item)
         summaries.append({
             "product": prod or "产品",
-            "summary": info.get("summary", ""),
+            "summary": s,
         })
 
     summary = "\n\n".join(
@@ -299,12 +314,16 @@ async def _analyze_single_record(
         db.commit()
         return {"success": False, "error": "no attachment"}
 
-    # Download ALL PDFs and extract text from each
+    # Download PDFs and extract text — only analyze PDFs that look like inspection reports
     import httpx
     import fitz  # PyMuPDF
 
+    _INSPECTION_REPORT_KEYWORDS = ["巡检报告", "巡检", "Inspection", "inspection"]
+    _PDF_EXTENSIONS = (".pdf", ".PDF")
+
     ai_infos = []
     download_errors = []
+    has_inspection_pdf = False
     for att in report_attachments:
         if not isinstance(att, dict):
             continue
@@ -312,6 +331,15 @@ async def _analyze_single_record(
         filename = att.get("filename", "report.pdf")
         if not url:
             continue
+
+        # Skip non-PDF files (they will still be sent as attachments at send time)
+        if not filename.lower().endswith(".pdf"):
+            logger.info("Skipping non-PDF attachment for AI analysis: %s", filename)
+            continue
+
+        # Only run AI on PDFs that look like inspection reports
+        is_inspection_report = any(kw in filename for kw in _INSPECTION_REPORT_KEYWORDS)
+
         try:
             async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
                 resp = await client.get(url)
@@ -322,19 +350,33 @@ async def _analyze_single_record(
                     pdf_text += page.get_text()
                 doc.close()
 
-                if pdf_text.strip():
-                    info, ai_error = extract_info_with_ai(pdf_text)
-                    if info:
-                        info["_filename"] = filename
-                        ai_infos.append(info)
-                    if ai_error:
-                        download_errors.append(f"{filename}: {ai_error}")
-                else:
+                if not pdf_text.strip():
                     download_errors.append(f"{filename}: PDF 文本为空")
+                    continue
+
+                if not is_inspection_report:
+                    # Not an inspection report — skip AI analysis
+                    logger.info("Skipping non-inspection PDF for AI analysis: %s", filename)
+                    continue
+
+                has_inspection_pdf = True
+                info, ai_error = extract_info_with_ai(pdf_text)
+                if info:
+                    info["_filename"] = filename
+                    ai_infos.append(info)
+                if ai_error:
+                    download_errors.append(f"{filename}: {ai_error}")
         except Exception as e:
             logger.warning("Failed to download attachment for analysis %s: %s", record_id, e)
             download_errors.append(f"{filename}: {e}")
             continue
+
+    if not has_inspection_pdf:
+        analysis.analysis_status = "failed"
+        analysis.error_message = "未找到巡检报告PDF（文件名需包含'巡检报告'或'巡检'）" + (f" ({'; '.join(download_errors)})" if download_errors else "")
+        analysis.analyzed_at = datetime.now(timezone.utc)
+        db.commit()
+        return {"success": False, "error": "no inspection report PDF"}
 
     if not ai_infos:
         analysis.analysis_status = "failed"
