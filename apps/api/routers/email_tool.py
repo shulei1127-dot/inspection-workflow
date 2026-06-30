@@ -445,9 +445,17 @@ async def get_email_config():
 
 
 @router.get("/api/email-tool/history")
-async def get_email_history():
-    """Return last 20 send history records."""
-    return {"history": _load_history()[:20]}
+async def get_email_history(
+    limit: int = Query(5, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+):
+    """Return send history records with pagination."""
+    all_history = _load_history()
+    total = len(all_history)
+    return {
+        "total": total,
+        "history": all_history[offset : offset + limit],
+    }
 
 
 @router.post("/api/email-tool/send")
@@ -643,7 +651,7 @@ async def re_analyze_record(record_id: str, db: Session = Depends(get_db)):
     # Re-run pre-analysis (will pick up the deleted record as new)
     from services.email_pre_analysis import run_email_pre_analysis
 
-    result = await run_email_pre_analysis(db, auto_send=False)
+    result = await run_email_pre_analysis(db, auto_send=False, force_refresh=True)
     return {"status": "success", "result": result}
 
 

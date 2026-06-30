@@ -114,6 +114,21 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
             registered_ids.append("monitor:email-pre-analysis")
             logger.info("Registered email pre-analysis job: cron workdays 10:30/14:30/16:30/18:30")
 
+    # Daily change summary job
+    if settings.daily_change_summary_enabled:
+        daily_summary_cron = settings.daily_change_summary_cron.strip()
+        if daily_summary_cron:
+            scheduler.add_job(
+                _run_daily_change_summary_job,
+                trigger=CronTrigger.from_crontab(daily_summary_cron, timezone=_SHANGHAI_TZ),
+                id="daily:change-summary",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
+            registered_ids.append("daily:change-summary")
+            logger.info("Registered daily change summary job with cron: %s", daily_summary_cron)
+
     return registered_ids
 
 
@@ -359,3 +374,32 @@ def _run_email_pre_analysis_job() -> None:
 
     # Send DingTalk notification
     asyncio.run(notify_email_pre_analysis(result, error))
+
+
+def _run_daily_change_summary_job() -> None:
+    """Scheduled daily change summary job runner.
+
+    Collects git commits, builds daily summary, and pushes the detailed report.
+    """
+    from services.dingtalk_notifier import notify_daily_change_summary
+
+    error = None
+    result = {}
+
+    try:
+        from services.change_log_service import run_daily_change_summary
+
+        with SessionLocal() as db:
+            result = asyncio.run(run_daily_change_summary(db))
+            logger.info(
+                "Scheduled daily change summary completed: date=%s entries=%d pushed=%s",
+                result.get("date"),
+                result.get("total_entries", 0),
+                result.get("push_result", {}).get("pushed", False),
+            )
+    except Exception as e:
+        error = str(e)
+        logger.exception("Scheduled daily change summary job failed")
+
+    if error:
+        asyncio.run(notify_daily_change_summary(result, error))

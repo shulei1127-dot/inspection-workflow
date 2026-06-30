@@ -26,6 +26,14 @@
           <span class="nav-icon">📧</span>
           <span>邮件发送</span>
         </router-link>
+        <router-link to="/change-logs" class="nav-item" active-class="active">
+          <span class="nav-icon">📚</span>
+          <span>变更知识库</span>
+        </router-link>
+        <router-link to="/task-logs" class="nav-item" active-class="active">
+          <span class="nav-icon">📝</span>
+          <span>任务日志</span>
+        </router-link>
       </nav>
       <div class="sidebar-footer">
         <div :class="['health-dot', healthOk ? 'ok' : 'err']"></div>

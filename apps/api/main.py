@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from apps.api.routers import email_tool, health, monitor, statistics, sync, triggers, work_orders
+from apps.api.routers import change_logs, email_tool, health, monitor, statistics, sync, task_logs, triggers, work_orders
 from apps.api.routers import ws as websocket
 from core.config import get_settings
 from core.db import create_all
@@ -65,6 +65,8 @@ app.include_router(triggers.router)
 app.include_router(work_orders.router)
 app.include_router(statistics.router)
 app.include_router(email_tool.router)
+app.include_router(change_logs.router)
+app.include_router(task_logs.router)
 app.include_router(websocket.router)
 
 # Serve frontend static files (built Vue app)

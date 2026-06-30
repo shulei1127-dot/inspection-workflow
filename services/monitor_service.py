@@ -686,17 +686,18 @@ async def trigger_manual_dispatch(db: Session, record_id: str) -> dict:
 # ── Email pending (客户巡检派单 table) ───────────────────────────────────
 
 
-async def get_email_pending(db: Session) -> dict:
+async def get_email_pending(db: Session, force_refresh: bool = False) -> dict:
     """Return AITable records that meet email sending conditions.
 
     Condition: 邮件是否发送!='是' + 巡检报告 has attachment
 
     Results are cached for up to 2 hours (refreshed by scheduled probe).
+    Set force_refresh=True to bypass cache and fetch latest from AITable.
     """
     global _email_pending_cache
 
-    # Return cached result if fresh
-    if _email_pending_cache is not None:
+    # Return cached result if fresh (unless force_refresh)
+    if not force_refresh and _email_pending_cache is not None:
         ts, cached = _email_pending_cache
         if time.time() - ts < _EMAIL_CACHE_TTL:
             return cached
@@ -819,9 +820,10 @@ async def trigger_manual_email(db: Session, record_id: str, extra_emails: list[s
     if not email_list:
         return {"status": "error", "message": "客户邮箱为空，请先填写收件人邮箱"}
 
-    # Download attachments
+    # Download attachments (skip Word docs — PDF report is sufficient for customers)
     attachments = []
     download_errors = []
+    _WORD_EXTENSIONS = (".doc", ".docx")
     for att in report_attachments:
         if not isinstance(att, dict):
             continue
@@ -829,6 +831,9 @@ async def trigger_manual_email(db: Session, record_id: str, extra_emails: list[s
         url = att.get("url", "")
         if not url:
             download_errors.append(f"{filename}: 无下载链接")
+            continue
+        if filename.lower().endswith(_WORD_EXTENSIONS):
+            logger.info("Skipping Word doc for email attachment: %s", filename)
             continue
         try:
             import httpx

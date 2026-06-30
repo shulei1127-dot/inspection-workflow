@@ -156,7 +156,7 @@ def _merge_multi_report_results(ai_infos: list[dict]) -> dict:
     }
 
 
-async def run_email_pre_analysis(db: Session, *, auto_send: bool = False) -> dict:
+async def run_email_pre_analysis(db: Session, *, auto_send: bool = False, force_refresh: bool = False) -> dict:
     """Pre-analyze email-pending AITable records that haven't been analyzed yet.
 
     If auto_send is True, automatically send email for successfully analyzed
@@ -167,7 +167,7 @@ async def run_email_pre_analysis(db: Session, *, auto_send: bool = False) -> dic
     from services.monitor_service import get_email_pending
 
     # 1. Get current email-pending records from AITable
-    email_result = await get_email_pending(db)
+    email_result = await get_email_pending(db, force_refresh=force_refresh)
     pending_records = email_result.get("pending", [])
     scanned = len(pending_records)
 
@@ -319,11 +319,11 @@ async def _analyze_single_record(
     import fitz  # PyMuPDF
 
     _INSPECTION_REPORT_KEYWORDS = ["巡检报告", "巡检", "Inspection", "inspection"]
-    _PDF_EXTENSIONS = (".pdf", ".PDF")
 
-    ai_infos = []
+    # First pass: download all PDFs and classify them
+    # (non-PDF files like Word docs are skipped for AI analysis but will be sent as email attachments)
+    pdf_texts: list[tuple[str, str, bool]] = []  # (filename, text, is_inspection_report)
     download_errors = []
-    has_inspection_pdf = False
     for att in report_attachments:
         if not isinstance(att, dict):
             continue
@@ -332,12 +332,13 @@ async def _analyze_single_record(
         if not url:
             continue
 
-        # Skip non-PDF files (they will still be sent as attachments at send time)
+        # Skip non-PDF files for AI analysis.
+        # Word docs (.doc/.docx) are NOT sent to customers (PDF report is sufficient).
+        # Other non-PDF files (contracts, authorization letters, etc.) ARE sent as email attachments.
         if not filename.lower().endswith(".pdf"):
             logger.info("Skipping non-PDF attachment for AI analysis: %s", filename)
             continue
 
-        # Only run AI on PDFs that look like inspection reports
         is_inspection_report = any(kw in filename for kw in _INSPECTION_REPORT_KEYWORDS)
 
         try:
@@ -354,29 +355,48 @@ async def _analyze_single_record(
                     download_errors.append(f"{filename}: PDF 文本为空")
                     continue
 
-                if not is_inspection_report:
-                    # Not an inspection report — skip AI analysis
-                    logger.info("Skipping non-inspection PDF for AI analysis: %s", filename)
-                    continue
-
-                has_inspection_pdf = True
-                info, ai_error = extract_info_with_ai(pdf_text)
-                if info:
-                    info["_filename"] = filename
-                    ai_infos.append(info)
-                if ai_error:
-                    download_errors.append(f"{filename}: {ai_error}")
+                pdf_texts.append((filename, pdf_text, is_inspection_report))
         except Exception as e:
             logger.warning("Failed to download attachment for analysis %s: %s", record_id, e)
             download_errors.append(f"{filename}: {e}")
             continue
 
-    if not has_inspection_pdf:
+    # Second pass: decide which PDFs to run AI on
+    # Strategy: prefer PDFs whose filename matches inspection report keywords;
+    # if none match, fall back to analyzing ALL PDFs (degradation to avoid false negatives)
+    inspection_pdfs = [(fn, txt) for fn, txt, is_ir in pdf_texts if is_ir]
+    other_pdfs = [(fn, txt) for fn, txt, is_ir in pdf_texts if not is_ir]
+
+    if inspection_pdfs:
+        ai_candidates = inspection_pdfs
+        for fn, _ in other_pdfs:
+            logger.info("Skipping non-inspection PDF for AI analysis: %s (inspection PDFs found)", fn)
+    elif other_pdfs:
+        # No PDF matched inspection keywords — fall back to analyzing all PDFs
+        ai_candidates = other_pdfs
+        logger.info(
+            "No PDF filename matched inspection keywords, falling back to analyzing all %d PDF(s)",
+            len(other_pdfs),
+        )
+    else:
+        ai_candidates = []
+
+    if not ai_candidates:
         analysis.analysis_status = "failed"
         analysis.error_message = "未找到巡检报告PDF（文件名需包含'巡检报告'或'巡检'）" + (f" ({'; '.join(download_errors)})" if download_errors else "")
         analysis.analyzed_at = datetime.now(timezone.utc)
         db.commit()
         return {"success": False, "error": "no inspection report PDF"}
+
+    # Run AI extraction on selected PDFs
+    ai_infos = []
+    for filename, pdf_text in ai_candidates:
+        info, ai_error = extract_info_with_ai(pdf_text)
+        if info:
+            info["_filename"] = filename
+            ai_infos.append(info)
+        if ai_error:
+            download_errors.append(f"{filename}: {ai_error}")
 
     if not ai_infos:
         analysis.analysis_status = "failed"
@@ -394,7 +414,22 @@ async def _analyze_single_record(
     analysis.product_name = merged.get("product_name") or analysis.product_name
     analysis.inspection_date = ai_infos[0].get("inspection_date") if ai_infos else None
     analysis.quantity = merged.get("quantity") or analysis.quantity
-    analysis.emails = ", ".join(merged.get("emails", [])) if merged.get("emails") else analysis.emails
+    ai_emails = merged.get("emails", [])
+    if ai_emails:
+        analysis.emails = ", ".join(ai_emails)
+    elif not analysis.emails:
+        # AI didn't find emails in PDF, fallback to AITable "报告发送邮箱" field
+        from services.monitor_service import get_email_pending
+        try:
+            email_result = await get_email_pending(db, force_refresh=True)
+            for item in email_result.get("pending", []):
+                if item.get("record_id") == record_id:
+                    ait_emails = item.get("email_addresses", [])
+                    if ait_emails:
+                        analysis.emails = ", ".join(ait_emails)
+                    break
+        except Exception:
+            pass
     analysis.summary = merged.get("summary") or analysis.summary
     analysis.summaries = merged.get("summaries")
     analysis.ai_info = ai_infos if len(ai_infos) > 1 else (ai_infos[0] if ai_infos else None)
@@ -587,7 +622,11 @@ async def preview_email_content(
                 if isinstance(report_attachments, list):
                     for att in report_attachments:
                         if isinstance(att, dict):
-                            attachment_filenames.append(att.get("filename", "report.pdf"))
+                            fn = att.get("filename", "report.pdf")
+                            # Skip Word docs in preview (same filter as send)
+                            if fn.lower().endswith((".doc", ".docx")):
+                                continue
+                            attachment_filenames.append(fn)
                 break
     except Exception as e:
         logger.warning("Failed to fetch attachment filenames for preview: %s", e)
@@ -687,6 +726,7 @@ async def send_email_from_pre_analysis(
 
     attachments = []
     download_errors = []
+    _WORD_EXTENSIONS = (".doc", ".docx")
     for att in report_attachments:
         if not isinstance(att, dict):
             continue
@@ -694,6 +734,10 @@ async def send_email_from_pre_analysis(
         url = att.get("url", "")
         if not url:
             download_errors.append(f"{filename}: 无下载链接")
+            continue
+        # Skip Word docs (.doc/.docx) — PDF report is sufficient for customers
+        if filename.lower().endswith(_WORD_EXTENSIONS):
+            logger.info("Skipping Word doc for email attachment: %s", filename)
             continue
         try:
             async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:

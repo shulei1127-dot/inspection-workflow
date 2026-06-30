@@ -373,3 +373,17 @@ async def notify_email_pre_analysis(result: dict, error: str | None = None) -> b
             content += f"，{send_failed} 条失败（需人工确认）"
 
     return await send_dingtalk_notification(title, content)
+
+
+async def notify_daily_change_summary(_result: dict, error: str | None = None) -> bool:
+    """Send notification only when daily change summary job fails.
+
+    On success, the detailed daily report is already pushed by
+    push_daily_summary() inside the service, so we only notify on error
+    to avoid sending duplicate messages.
+    """
+    if error:
+        title = "❌ 每日变更摘要任务失败"
+        content = f"错误信息：{error}"
+        return await send_dingtalk_notification(title, content)
+    return False

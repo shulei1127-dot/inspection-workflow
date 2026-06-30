@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     email_pre_analysis_enabled: bool = True  # 启用邮件预分析定时任务
     email_pre_analysis_cron: str = "0 9 * * *"  # 每天9点运行一次预分析
 
+    # Daily change summary
+    daily_change_summary_enabled: bool = True
+    daily_change_summary_cron: str = "0 19 * * *"
+    daily_change_summary_repo_path: str = "/data/inspect/inspection-workflow"
+    daily_change_summary_webhook_url: str = ""
+
     # DingTalk Notification
     dingtalk_webhook_url: str = ""  # 钉钉机器人 webhook URL
     dingtalk_secret: str = ""  # 钉钉机器人加签密钥

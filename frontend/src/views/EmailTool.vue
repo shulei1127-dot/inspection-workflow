@@ -159,7 +159,17 @@
           </template>
         </el-table-column>
       </el-table>
-      <div v-else class="empty-hint">暂无发送记录</div>
+      <div v-if="historyTotal > historyPageSize" style="margin-top: 12px; display: flex; justify-content: flex-end">
+        <el-pagination
+          v-model:current-page="historyPage"
+          :page-size="historyPageSize"
+          :total="historyTotal"
+          layout="total, prev, pager, next"
+          small
+          @current-change="loadHistory"
+        />
+      </div>
+      <div v-else-if="!history.length" class="empty-hint">暂无发送记录</div>
     </div>
   </div>
 </template>
@@ -180,6 +190,9 @@ const fetchingAttachments = ref(false)
 const sendResult = ref<{ success: boolean; message: string } | null>(null)
 const showConfig = ref(false)
 const history = ref<any[]>([])
+const historyTotal = ref(0)
+const historyPage = ref(1)
+const historyPageSize = 5
 const fromAitable = ref(false)
 const fromPreAnalysis = ref(false)
 const userEditedEmails = ref(false)
@@ -409,10 +422,13 @@ function saveConfig() {
 }
 
 function loadHistory() {
-  fetch('/api/email-tool/history').then(r => r.json()).then(res => {
+  const offset = (historyPage.value - 1) * historyPageSize
+  fetch(`/api/email-tool/history?limit=${historyPageSize}&offset=${offset}`).then(r => r.json()).then(res => {
     history.value = res.history || []
+    historyTotal.value = res.total || 0
   }).catch(() => {
     history.value = []
+    historyTotal.value = 0
   })
 }
 

@@ -32,6 +32,16 @@ const router = createRouter({
       name: 'EmailTool',
       component: () => import('../views/EmailTool.vue'),
     },
+    {
+      path: '/change-logs',
+      name: 'ChangeLogs',
+      component: () => import('../views/ChangeLog.vue'),
+    },
+    {
+      path: '/task-logs',
+      name: 'TaskLogs',
+      component: () => import('../views/TaskLogs.vue'),
+    },
   ],
 })
 

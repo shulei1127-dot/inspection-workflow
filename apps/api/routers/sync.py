@@ -29,7 +29,8 @@ async def trigger_sync(
     db: Session = Depends(get_db),
 ):
     """Pull PTS work orders to local DB and optionally push to DingTalk AITable."""
-    log = await run_sync(db, trigger_source="manual", sync_month=sync_month, push_to_aitable=push)
+    sync_type = "full_sync" if push else "fetch_only"
+    log = await run_sync(db, trigger_source="manual", sync_type=sync_type, sync_month=sync_month, push_to_aitable=push)
 
     # Auto-adjust planned completion to month end
     from services.sync_service import adjust_planned_completion_to_month_end
@@ -53,7 +54,29 @@ async def push_to_dingtalk(
     db: Session = Depends(get_db),
 ):
     """Push pending work orders from local DB to DingTalk AITable."""
-    return await push_to_aitable(db, sync_month=sync_month)
+    result = await push_to_aitable(db, sync_month=sync_month)
+
+    # Record a SyncLog for push-only operation
+    try:
+        log = SyncLog(
+            trigger_source="manual",
+            sync_type="push_only",
+            sync_month=sync_month or current_month(),
+            status="success" if result.get("status") != "error" else "failed",
+            fetched_count=0,
+            created_count=result.get("pushed", 0),
+            updated_count=0,
+            skipped_count=0,
+            error_message=result.get("message"),
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+        )
+        db.add(log)
+        db.commit()
+    except Exception:
+        pass
+
+    return result
 
 
 @router.post("/api/sync/batch-push")
@@ -100,6 +123,26 @@ async def batch_push_to_dingtalk(
 
     db.commit()
 
+    # Record a SyncLog for batch-push operation
+    try:
+        log = SyncLog(
+            trigger_source="manual",
+            sync_type="batch_push",
+            sync_month=sync_month,
+            status="success" if failed == 0 else "partial",
+            fetched_count=0,
+            created_count=pushed,
+            updated_count=0,
+            skipped_count=failed,
+            error_message=None,
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+        )
+        db.add(log)
+        db.commit()
+    except Exception:
+        pass
+
     return {
         "status": "success" if failed == 0 else "partial",
         "pushed": pushed,
@@ -111,14 +154,19 @@ async def batch_push_to_dingtalk(
 @router.get("/api/sync/logs")
 async def get_sync_logs(
     limit: int = Query(20, le=100),
+    sync_type: str | None = Query(None, description="按操作类型筛选: full_sync/fetch_only/push_only/batch_push"),
     db: Session = Depends(get_db),
 ):
-    """List recent sync logs."""
-    logs = db.query(SyncLog).order_by(SyncLog.started_at.desc()).limit(limit).all()
+    """List recent sync logs, optionally filtered by sync_type."""
+    q = db.query(SyncLog).order_by(SyncLog.started_at.desc())
+    if sync_type:
+        q = q.filter(SyncLog.sync_type == sync_type)
+    logs = q.limit(limit).all()
     return [
         {
             "id": str(log.id),
             "trigger_source": log.trigger_source,
+            "sync_type": log.sync_type,
             "sync_month": log.sync_month,
             "status": log.status,
             "fetched_count": log.fetched_count,

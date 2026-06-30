@@ -133,11 +133,51 @@ export const batchPushToDingtalk = (data: { work_order_ids: string[] }) =>
 export const adjustPlannedCompletion = (data: { work_order_ids?: string[]; month?: string }) =>
   postJson('/api/work-orders/adjust-planned-completion', data)
 
-export const getSyncLogs = (limit = 50) =>
-  fetchJson(`/api/sync/logs?limit=${limit}`)
+export const getSyncLogs = (limit = 50, syncType?: string) => {
+  const qs = new URLSearchParams()
+  qs.set('limit', String(limit))
+  if (syncType) qs.set('sync_type', syncType)
+  return fetchJson('/api/sync/logs?' + qs.toString())
+}
 
 // ── Health ──
 export const getHealth = () => fetchJson('/api/health')
+
+// ── Change Logs ──
+export const getChangeLogs = (params: Record<string, any> = {}) => {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') qs.set(k, String(v))
+  }
+  return fetchJson('/api/change-logs?' + qs.toString())
+}
+
+export const createChangeLog = (data: { change_date: string; category: string; title: string; detail?: string; author?: string }) =>
+  fetchJson('/api/change-logs', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
+
+export const deleteChangeLog = (id: string) =>
+  fetchJson(`/api/change-logs/${id}`, { method: 'DELETE' })
+
+export const collectChangeLogs = (date: string) =>
+  fetchJson(`/api/change-logs/collect?date=${encodeURIComponent(date)}`, { method: 'POST' })
+
+export const pushDailyChangeLogs = (date: string, force = false) =>
+  fetchJson(`/api/change-logs/push-daily?date=${encodeURIComponent(date)}&force=${force}`, { method: 'POST' })
+
+export const getChangeLogSummary = (date: string) =>
+  fetchJson(`/api/change-logs/summary?date=${encodeURIComponent(date)}`)
+
+// ── Task Logs (unified) ──
+export const getTaskLogs = (params: Record<string, any> = {}) => {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') qs.set(k, String(v))
+  }
+  return fetchJson('/api/task-logs?' + qs.toString())
+}
 
 // ── WebSocket ──
 export function createEventStream(onEvent: (type: string, data: any) => void) {

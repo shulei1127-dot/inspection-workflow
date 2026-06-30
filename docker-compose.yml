@@ -39,6 +39,8 @@ services:
       - /root/.dws:/root/.dws
       # 邮件工具数据持久化（发送历史 + SMTP配置）
       - email-tool-data:/app/email_tool/data
+      # Git 仓库（用于每日变更采集）
+      - /data/inspect/inspection-workflow/.git:/app/.git:ro
     restart: unless-stopped
 
 volumes:

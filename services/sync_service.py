@@ -39,6 +39,7 @@ async def run_sync(
     db: Session,
     *,
     trigger_source: str = "manual",
+    sync_type: str = "full_sync",
     sync_month: str | None = None,
     push_to_aitable: bool = False,
     only_new_for_month: bool = False,
@@ -46,6 +47,7 @@ async def run_sync(
     """Run the PTS → DingTalk sync pipeline.
 
     Args:
+        sync_type: Type of sync operation (full_sync/fetch_only/push_only/batch_push).
         push_to_aitable: If False, only pull PTS data to local DB without
                          pushing to DingTalk AITable. User can push later.
         only_new_for_month: If True, only push work orders that have never been
@@ -59,6 +61,7 @@ async def run_sync(
     log = SyncLog(
         id=uuid.uuid4(),
         trigger_source=trigger_source,
+        sync_type=sync_type,
         sync_month=sync_month,
         status="running",
         started_at=datetime.now(timezone.utc),
