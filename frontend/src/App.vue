@@ -26,6 +26,10 @@
           <span class="nav-icon">📧</span>
           <span>邮件发送</span>
         </router-link>
+        <router-link to="/audit" class="nav-item" active-class="active">
+          <span class="nav-icon">🔍</span>
+          <span>交付转售后</span>
+        </router-link>
       </nav>
       <div class="sidebar-footer">
         <div :class="['health-dot', healthOk ? 'ok' : 'err']"></div>

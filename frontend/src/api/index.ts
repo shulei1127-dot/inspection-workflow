@@ -147,3 +147,16 @@ export function createEventStream(onEvent: (type: string, data: any) => void) {
   }
   return ws
 }
+
+// ── Review (交付转售后审核) ──
+export const getAuditLogs = (params: Record<string, any> = {}) => {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') qs.set(k, String(v))
+  }
+  return fetchJson('/api/review/logs?' + qs.toString())
+}
+
+export const runReview = () => postJson('/api/review/run')
+
+export const getPendingProjects = () => fetchJson('/api/review/pending')

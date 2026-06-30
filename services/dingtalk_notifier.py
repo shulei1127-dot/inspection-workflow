@@ -343,3 +343,39 @@ async def notify_email_pre_analysis(result: dict, error: str | None = None) -> b
 ⚠️ 存在失败，请查看日志"""
 
     return await send_dingtalk_notification(title, content)
+
+
+async def notify_review_pipeline(result: dict, error: str | None = None) -> bool:
+    """通知交付转售后审核流水线结果。"""
+    if error:
+        title = "❌ 交付转售后审核失败"
+        content = f"错误信息：{error}"
+        return await send_dingtalk_notification(title, content)
+
+    total = result.get("total", 0)
+    passed = result.get("passed", 0)
+    rejected = result.get("rejected", 0)
+    manual = result.get("manual", 0)
+    errors = result.get("errors", 0)
+
+    title = "✅ 交付转售后审核完成"
+
+    if total == 0:
+        content = "当前无待审核项目。"
+    elif errors == 0:
+        content = f"""- 审核项目：{total} 个
+- 通过：{passed} 个
+- 拒绝：{rejected} 个
+- 转人工：{manual} 个
+
+✅ 全部完成"""
+    else:
+        content = f"""- 审核项目：{total} 个
+- 通过：{passed} 个
+- 拒绝：{rejected} 个
+- 转人工：{manual} 个
+- 失败：{errors} 个
+
+⚠️ 存在失败，请查看日志"""
+
+    return await send_dingtalk_notification(title, content)

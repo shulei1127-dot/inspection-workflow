@@ -112,6 +112,21 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
             registered_ids.append("monitor:email-pre-analysis")
             logger.info("Registered email pre-analysis job with cron: %s", pre_analysis_cron)
 
+    # Review pipeline job (交付转售后审核)
+    if settings.review_pipeline_enabled:
+        review_cron = settings.review_pipeline_cron.strip()
+        if review_cron:
+            scheduler.add_job(
+                _run_review_pipeline_job,
+                trigger=CronTrigger.from_crontab(review_cron),
+                id="review:pipeline",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
+            registered_ids.append("review:pipeline")
+            logger.info("Registered review pipeline job with cron: %s", review_cron)
+
     return registered_ids
 
 
@@ -319,3 +334,31 @@ def _run_email_pre_analysis_job() -> None:
 
     # Send DingTalk notification
     asyncio.run(notify_email_pre_analysis(result, error))
+
+
+def _run_review_pipeline_job() -> None:
+    """Scheduled review pipeline job runner (交付转售后审核)."""
+    from services.dingtalk_notifier import notify_review_pipeline
+
+    error = None
+    result = {}
+
+    try:
+        from services.review.review_service import run_review_pipeline
+
+        with SessionLocal() as db:
+            result = asyncio.run(run_review_pipeline(db, trigger_source="scheduler"))
+            logger.info(
+                "Scheduled review pipeline completed: total=%d passed=%d rejected=%d manual=%d errors=%d",
+                result.get("total", 0),
+                result.get("passed", 0),
+                result.get("rejected", 0),
+                result.get("manual", 0),
+                result.get("errors", 0),
+            )
+    except Exception as e:
+        error = str(e)
+        logger.exception("Scheduled review pipeline job failed")
+
+    # Send DingTalk notification
+    asyncio.run(notify_review_pipeline(result, error))

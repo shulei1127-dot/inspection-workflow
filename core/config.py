@@ -58,6 +58,20 @@ class Settings(BaseSettings):
     dingtalk_secret: str = ""  # 钉钉机器人加签密钥
     dingtalk_holiday_mute: bool = True  # 法定节假日及非工作日不发送钉钉通知
 
+    # Review (交付转售后审核)
+    review_pipeline_enabled: bool = False  # 审核定时流水线总开关（默认关闭）
+    review_pipeline_cron: str = "0 16 * * *"  # 审核定时任务 cron
+    review_real_execution_enabled: bool = False  # 真实执行开关（采集+审核+写入）
+    review_writeback_enabled: bool = False  # 钉钉写入开关
+    pts_review_api_token: str = ""  # 审核 PTS API Token（空则回退到 pts_api_token）
+    pts_review_approval_api_key: str = ""  # 审核通过/拒绝专用 API Key
+    pts_review_after_sale_filter_ids: str = ""  # 按售后 PTS 用户 ID 过滤（逗号分隔）
+
+    # Review 钉钉数据表配置
+    review_aitable_base_id: str = "o14dA3GK8g5LavPaT7dDQqoxV9ekBD76"
+    review_aitable_main_table_id: str = "Igz9TVd"
+    review_aitable_corp_id: str = "ding56395822e2c6d50035c2f4657eb6378f"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

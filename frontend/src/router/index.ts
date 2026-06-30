@@ -32,6 +32,11 @@ const router = createRouter({
       name: 'EmailTool',
       component: () => import('../views/EmailTool.vue'),
     },
+    {
+      path: '/audit',
+      name: 'Audit',
+      component: () => import('../views/Audit.vue'),
+    },
   ],
 })
 
