@@ -127,6 +127,36 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
             registered_ids.append("review:pipeline")
             logger.info("Registered review pipeline job with cron: %s", review_cron)
 
+    # Daily change summary job
+    if settings.daily_change_summary_enabled:
+        daily_summary_cron = settings.daily_change_summary_cron.strip()
+        if daily_summary_cron:
+            scheduler.add_job(
+                _run_daily_change_summary_job,
+                trigger=CronTrigger.from_crontab(daily_summary_cron),
+                id="daily:change-summary",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
+            registered_ids.append("daily:change-summary")
+            logger.info("Registered daily change summary job with cron: %s", daily_summary_cron)
+
+    # Visit pipeline job (交付转售后回访闭环)
+    if settings.visit_pipeline_enabled:
+        visit_cron = settings.visit_pipeline_cron.strip()
+        if visit_cron:
+            scheduler.add_job(
+                _run_visit_pipeline_job,
+                trigger=CronTrigger.from_crontab(visit_cron),
+                id="visit:pipeline",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
+            registered_ids.append("visit:pipeline")
+            logger.info("Registered visit pipeline job with cron: %s", visit_cron)
+
     return registered_ids
 
 
@@ -143,7 +173,7 @@ def _run_sync_job() -> None:
     result = None
 
     try:
-        from services.sync_service import run_sync
+        from services.sync_service import run_sync, adjust_planned_completion_to_month_end
 
         with SessionLocal() as db:
             sync_log = asyncio.run(run_sync(db, trigger_source="scheduler", push_to_aitable=True, only_new_for_month=True))
@@ -154,6 +184,17 @@ def _run_sync_job() -> None:
                 sync_log.created_count,
                 sync_log.updated_count,
             )
+
+            # Auto-adjust planned completion to month end
+            adjust_result = asyncio.run(adjust_planned_completion_to_month_end(db, month=sync_log.sync_month))
+            logger.info(
+                "Planned completion adjustment: adjusted=%d skipped=%d pts_updated=%d aitable_updated=%d",
+                adjust_result.get("adjusted", 0),
+                adjust_result.get("skipped", 0),
+                adjust_result.get("pts_updated", 0),
+                adjust_result.get("aitable_updated", 0),
+            )
+
             # Fetch newly created work orders from the same session
             new_orders = []
             if sync_log.started_at and sync_log.completed_at:
@@ -362,3 +403,90 @@ def _run_review_pipeline_job() -> None:
 
     # Send DingTalk notification
     asyncio.run(notify_review_pipeline(result, error))
+
+
+def _run_daily_change_summary_job() -> None:
+    """Scheduled daily change summary job runner.
+
+    Collects git commits, builds daily summary, and pushes the detailed report.
+    """
+    from services.dingtalk_notifier import notify_daily_change_summary
+
+    error = None
+    result = {}
+
+    try:
+        from services.change_log_service import run_daily_change_summary
+
+        with SessionLocal() as db:
+            result = asyncio.run(run_daily_change_summary(db))
+            logger.info(
+                "Scheduled daily change summary completed: date=%s entries=%d pushed=%s",
+                result.get("date"),
+                result.get("total_entries", 0),
+                result.get("push_result", {}).get("pushed", False),
+            )
+    except Exception as e:
+        error = str(e)
+        logger.exception("Scheduled daily change summary job failed")
+
+    if error:
+        asyncio.run(notify_daily_change_summary(result, error))
+
+
+def _run_visit_pipeline_job() -> None:
+    """Scheduled visit pipeline job runner (交付转售后回访闭环).
+
+    查找已通过审核但未完成回访的项目，逐个触发回访闭环。
+    """
+    from services.dingtalk_notifier import notify_visit_pipeline
+
+    error = None
+    result = {}
+
+    try:
+        from services.visit.visit_service import find_unvisited_approved_projects, run_visit_pipeline
+
+        with SessionLocal() as db:
+            projects = asyncio.run(find_unvisited_approved_projects(db))
+            total = len(projects)
+            completed = 0
+            failed = 0
+            skipped = 0
+
+            for proj in projects:
+                try:
+                    r = asyncio.run(run_visit_pipeline(
+                        db,
+                        project_id=proj["project_id"],
+                        project_name=proj.get("project_name"),
+                        customer_name=proj.get("customer_name"),
+                        region=proj.get("region"),
+                        trigger_source="scheduler",
+                    ))
+                    if r.get("status") in ("completed", "already_completed"):
+                        completed += 1
+                    elif r.get("status") == "skipped":
+                        skipped += 1
+                    else:
+                        failed += 1
+                except Exception as exc:
+                    failed += 1
+                    logger.warning("定时回访失败: project_id=%s, error=%s", proj["project_id"], exc)
+
+            result = {
+                "total": total,
+                "completed": completed,
+                "failed": failed,
+                "skipped": skipped,
+            }
+            logger.info(
+                "Scheduled visit pipeline completed: total=%d completed=%d failed=%d skipped=%d",
+                total, completed, failed, skipped,
+            )
+    except Exception as e:
+        error = str(e)
+        logger.exception("Scheduled visit pipeline job failed")
+
+    # Send DingTalk notification
+    asyncio.run(notify_visit_pipeline(result, error))

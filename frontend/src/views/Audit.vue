@@ -22,6 +22,23 @@
         <el-table-column prop="assigner_name" label="交付分配人" width="110" />
         <el-table-column prop="person_in_charge_name" label="交付负责人" width="110" />
         <el-table-column prop="after_sales_leader" label="售后负责人" width="100" />
+        <el-table-column label="PTS链接" width="90" align="center">
+          <template #default="{ row }">
+            <a :href="'https://pts.chaitin.net/project/' + row.project_id + '#base'" target="_blank" rel="noopener" class="pts-link">查看</a>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="100" align="center">
+          <template #default="{ row }">
+            <el-button
+              type="primary"
+              size="small"
+              :loading="auditingMap[row.project_id]"
+              @click="handleAuditSingle(row)"
+            >
+              {{ auditingMap[row.project_id] ? '审核中' : '审核' }}
+            </el-button>
+          </template>
+        </el-table-column>
       </el-table>
     </div>
 
@@ -68,6 +85,17 @@
             <span v-else style="color: #999">-</span>
           </template>
         </el-table-column>
+        <el-table-column label="回访" width="90" align="center">
+          <template #default="{ row }">
+            <router-link v-if="row.conclusion === '通过'" to="/visit" style="font-size: 12px; color: #409eff; text-decoration: none;">
+              <el-tag v-if="visitStatusMap[row.project_id] === 'completed'" type="success" size="small">已回访</el-tag>
+              <el-tag v-else-if="visitStatusMap[row.project_id] === 'running'" type="warning" size="small">回访中</el-tag>
+              <el-tag v-else-if="visitStatusMap[row.project_id] === 'failed' || visitStatusMap[row.project_id] === 'partial'" type="danger" size="small">失败</el-tag>
+              <span v-else style="color: #409eff; cursor: pointer;">待回访</span>
+            </router-link>
+            <span v-else style="color: #999">-</span>
+          </template>
+        </el-table-column>
         <el-table-column label="时间" width="170">
           <template #default="{ row }">
             {{ formatTime(row.created_at) }}
@@ -88,9 +116,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getAuditLogs, runReview, getPendingProjects } from '../api'
+import { getAuditLogs, runReview, getPendingProjects, auditSingleProject } from '../api'
 
 const logs = ref<any[]>([])
 const total = ref(0)
@@ -102,6 +130,10 @@ const running = ref(false)
 const pendingProjects = ref<any[]>([])
 const pendingLoading = ref(false)
 const pendingVisible = ref(false)
+const auditingMap = reactive<Record<string, boolean>>({})
+
+// 回访状态缓存：project_id -> status（从 visit 页面数据加载）
+const visitStatusMap = reactive<Record<string, string>>({})
 
 const filters = ref({
   conclusion: '',
@@ -136,10 +168,38 @@ async function loadData() {
     })
     logs.value = res.items || []
     total.value = res.total || 0
+    // 加载回访状态
+    await loadVisitStatus()
   } catch {
     // silent
   } finally {
     loading.value = false
+  }
+}
+
+async function loadVisitStatus() {
+  // 批量查询已通过审核项目的回访状态
+  const approved = logs.value.filter((r: any) => r.conclusion === '通过' && r.project_id)
+  if (!approved.length) return
+  try {
+    const { getVisitLogs } = await import('../api')
+    // 逐项目查询回访日志（简化方案：批量查询最近回访日志，然后按 project_id 匹配）
+    const visitRes: any = await getVisitLogs({ limit: 200 })
+    const visitItems: any[] = visitRes.items || []
+    // 构建 project_id -> 最新 visit 状态映射
+    const statusMap: Record<string, string> = {}
+    for (const v of visitItems) {
+      // 取最新的状态（列表已按 created_at desc 排序）
+      if (!statusMap[v.project_id]) {
+        statusMap[v.project_id] = v.status
+      }
+    }
+    // 将回访状态写入 visitStatusMap
+    for (const r of approved) {
+      visitStatusMap[r.project_id] = statusMap[r.project_id] || ''
+    }
+  } catch {
+    // 回访状态加载失败不影响主流程
   }
 }
 
@@ -173,6 +233,26 @@ async function loadPending() {
   }
 }
 
+async function handleAuditSingle(row: any) {
+  if (auditingMap[row.project_id]) return
+  auditingMap[row.project_id] = true
+  try {
+    const res: any = await auditSingleProject(row.project_id)
+    if (res.conclusion === 'error') {
+      ElMessage.error(`审核失败 (${row.project_name}): ${res.error || '未知错误'}`)
+    } else {
+      ElMessage.success(`${row.project_name}: ${res.conclusion}`)
+    }
+    // 刷新待审核列表和日志
+    loadPending()
+    loadData()
+  } catch (e: any) {
+    ElMessage.error(`审核失败 (${row.project_name}): ${e.message}`)
+  } finally {
+    auditingMap[row.project_id] = false
+  }
+}
+
 onMounted(() => {
   loadData()
 })
@@ -194,5 +274,13 @@ onMounted(() => {
   margin-top: 16px;
   display: flex;
   justify-content: flex-end;
+}
+.pts-link {
+  color: #409eff;
+  text-decoration: none;
+  font-size: 13px;
+}
+.pts-link:hover {
+  text-decoration: underline;
 }
 </style>

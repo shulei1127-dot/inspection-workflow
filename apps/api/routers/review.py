@@ -21,6 +21,20 @@ class ReviewRunResponse(BaseModel):
     reason: str | None = None
 
 
+class SingleAuditResponse(BaseModel):
+    project_id: str
+    project_name: str | None = None
+    customer_name: str | None = None
+    conclusion: str  # 通过 / 不通过 / 转人工审核 / error
+    region: str | None = None
+    delivery_type: str | None = None
+    project_type: str | None = None
+    rules: list[dict] | None = None
+    dingtalk_writeback: dict | None = None
+    pts_review_writeback: dict | None = None
+    error: str | None = None
+
+
 @router.post("/api/review/run", response_model=ReviewRunResponse)
 async def trigger_review(db: Session = Depends(get_db)):
     """手动触发交付转售后审核流水线。"""
@@ -35,6 +49,46 @@ async def trigger_review(db: Session = Depends(get_db)):
         manual=result.get("manual", 0),
         errors=result.get("errors", 0),
         reason=result.get("reason"),
+    )
+
+
+@router.post("/api/review/audit/{project_id}", response_model=SingleAuditResponse)
+async def audit_single_project(project_id: str, db: Session = Depends(get_db)):
+    """对单个待审核项目执行审核。"""
+    import logging
+    from services.review.review_service import audit_single_project as _audit, _save_audit_log
+
+    logger = logging.getLogger(__name__)
+
+    result = await _audit(project_id)
+
+    # 保存审核日志
+    try:
+        _save_audit_log(
+            db,
+            project_id=project_id,
+            project_name=result.get("project_name"),
+            customer_name=result.get("customer_name"),
+            result=result,
+            trigger_source="manual_single",
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.warning("单项目审核日志保存失败: project_id=%s", project_id)
+
+    return SingleAuditResponse(
+        project_id=result.get("project_id", project_id),
+        project_name=result.get("project_name"),
+        customer_name=result.get("customer_name"),
+        conclusion=result.get("conclusion", "error"),
+        region=result.get("region"),
+        delivery_type=result.get("delivery_type"),
+        project_type=result.get("project_type"),
+        rules=result.get("rules"),
+        dingtalk_writeback=result.get("dingtalk_writeback"),
+        pts_review_writeback=result.get("pts_review_writeback"),
+        error=result.get("error"),
     )
 
 

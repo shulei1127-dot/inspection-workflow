@@ -72,6 +72,27 @@ class Settings(BaseSettings):
     review_aitable_main_table_id: str = "Igz9TVd"
     review_aitable_corp_id: str = "ding56395822e2c6d50035c2f4657eb6378f"
 
+    # Visit (交付转售后回访闭环)
+    visit_pipeline_enabled: bool = False  # 回访流水线总开关（默认关闭）
+    visit_pipeline_cron: str = "0 17 * * *"  # 回访定时任务 cron
+    visit_real_execution_enabled: bool = False  # 真实执行开关（默认关闭）
+    visit_execution_mode: str = "direct_http"  # 执行模式: direct_http | browser_profile
+    visit_auto_retry_enabled: bool = True  # 失败自动重试
+    visit_max_retries: int = 3  # 最大重试次数
+    pts_visit_api_token: str = ""  # 回访专用 PTS Token（空则回退到 pts_review_api_token → pts_api_token）
+    visit_default_satisfaction: int = 5  # 默认满意度评分 (1-5)
+    visit_default_note: str = "自动回访完成"  # 默认回访备注
+    visit_writeback_enabled: bool = False  # 钉钉写入开关（默认关闭）
+    visit_writeback_aitable_base_id: str = ""  # 回访写入的 AITable base ID
+    visit_writeback_aitable_table_id: str = ""  # 回访写入的 AITable table ID
+    visit_writeback_link_field_id: str = ""  # 回访链接字段 ID
+
+    # Daily Change Summary (知识库变更)
+    daily_change_summary_enabled: bool = False  # 每日变更摘要定时任务（默认关闭）
+    daily_change_summary_cron: str = "0 18 * * *"  # 每天18点收集并推送变更摘要
+    daily_change_summary_repo_path: str = "/app"  # Git 仓库路径（容器内）
+    daily_change_summary_webhook_url: str = ""  # 变更摘要钉钉机器人 webhook（空则用默认）
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

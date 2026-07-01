@@ -644,9 +644,9 @@ async def get_email_pending(db: Session) -> dict:
         report_attachments = cells.get(DISPATCH["巡检报告"])
         email_sent = extract_select_name(cells.get(DISPATCH["邮件是否发送"]))
 
-        # Check conditions: has report + not yet sent
+        # Check conditions: has report + not yet sent + not excluded
         has_report = isinstance(report_attachments, list) and len(report_attachments) > 0
-        not_sent = not (email_sent and email_sent.strip() == "是")
+        not_sent = email_sent not in ("是", "不涉及", "未上传")
 
         if not (has_report and not_sent):
             continue

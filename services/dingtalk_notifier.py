@@ -379,3 +379,50 @@ async def notify_review_pipeline(result: dict, error: str | None = None) -> bool
 ⚠️ 存在失败，请查看日志"""
 
     return await send_dingtalk_notification(title, content)
+
+
+async def notify_daily_change_summary(_result: dict, error: str | None = None) -> bool:
+    """Send notification only when daily change summary job fails.
+
+    On success, the detailed daily report is already pushed by
+    push_daily_summary() inside the service, so we only notify on error
+    to avoid sending duplicate messages.
+    """
+    if error:
+        title = "❌ 每日变更摘要任务失败"
+        content = f"错误信息：{error}"
+        return await send_dingtalk_notification(title, content)
+    return False
+
+
+async def notify_visit_pipeline(result: dict, error: str | None = None) -> bool:
+    """通知交付转售后回访闭环流水线结果。"""
+    if error:
+        title = "❌ 交付转售后回访失败"
+        content = f"错误信息：{error}"
+        return await send_dingtalk_notification(title, content)
+
+    total = result.get("total", 0)
+    completed = result.get("completed", 0)
+    failed = result.get("failed", 0)
+    skipped = result.get("skipped", 0)
+
+    title = "✅ 交付转售后回访完成"
+
+    if total == 0:
+        content = "当前无需回访项目。"
+    elif failed == 0:
+        content = f"""- 待回访项目：{total} 个
+- 已完成：{completed} 个
+- 跳过：{skipped} 个
+
+✅ 全部完成"""
+    else:
+        content = f"""- 待回访项目：{total} 个
+- 已完成：{completed} 个
+- 失败：{failed} 个
+- 跳过：{skipped} 个
+
+⚠️ 存在失败，请查看日志"""
+
+    return await send_dingtalk_notification(title, content)

@@ -447,7 +447,7 @@ async def fetch_pending_list(*, after_sale_ids: list[str] | None = None) -> dict
         variables = {"after_sale_ids": after_sale_ids}
     else:
         # 移除 after_sale 过滤条件，查询所有 to_after_sale_review 项目
-        query = QUERY_PENDING_DELIVERY_LIST.replace("after_sale: $after_sale_ids, ", "")
+        query = QUERY_PENDING_DELIVERY_LIST.replace(", after_sale: $after_sale_ids", "")
         return await review_pts_query(query)
 
     return await review_pts_query(QUERY_PENDING_DELIVERY_LIST, variables)
@@ -496,14 +496,18 @@ async def submit_review(project_id: str, approved: bool, reason: str) -> dict | 
         logger.warning("pts_review_approval_api_key 未配置，无法回写 PTS 审核结果")
         return None
 
-    # 使用专用 token 直接调用，不走 review_pts_query
-    import asyncio
     import httpx
 
-    inlined = _inline_variables_enhanced(
-        REVIEW_AFTER_SALE_MUTATION,
-        {"id": project_id, "status": approved, "reason": reason},
-    )
+    # 使用标准 GraphQL variables 传递参数，避免 inline variables 时
+    # reason 中的换行符/双引号破坏查询语法
+    payload = {
+        "query": REVIEW_AFTER_SALE_MUTATION,
+        "variables": {
+            "id": project_id,
+            "status": approved,
+            "reason": reason,
+        },
+    }
 
     await _rate_limit()
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -513,11 +517,14 @@ async def submit_review(project_id: str, approved: bool, reason: str) -> dict | 
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {token}",
             },
-            json={"query": inlined},
+            json=payload,
         )
 
     if resp.status_code != 200:
-        logger.error("PTS review mutation failed: HTTP %d", resp.status_code)
+        logger.error(
+            "PTS review mutation failed: HTTP %d, body=%s",
+            resp.status_code, resp.text[:300],
+        )
         return None
 
     data = resp.json()
@@ -525,4 +532,9 @@ async def submit_review(project_id: str, approved: bool, reason: str) -> dict | 
         logger.error("PTS review mutation error: %s", data["errors"])
         return None
 
-    return data.get("data", {})
+    result = data.get("data", {})
+    logger.info(
+        "PTS review mutation success: project_id=%s, approved=%s",
+        project_id, approved,
+    )
+    return result

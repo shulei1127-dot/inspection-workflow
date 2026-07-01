@@ -71,35 +71,47 @@ def _inline_variables(query: str, variables: dict | None = None) -> str:
     return result
 
 
-async def pts_graphql_query(query: str, variables: dict | None = None) -> dict:
-    """Send a GraphQL query to PTS API with Bearer token auth."""
-    await _rate_limit()
+async def pts_graphql_query(query: str, variables: dict | None = None, max_retries: int = 3) -> dict:
+    """Send a GraphQL query to PTS API with Bearer token auth.
+
+    Retries up to max_retries times on 429 (rate limit) with exponential backoff.
+    """
     inlined_query = _inline_variables(query, variables)
-
     settings = get_settings()
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            settings.pts_graphql_url,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {settings.pts_api_token}",
-            },
-            json={"query": inlined_query},
-        )
 
-    if resp.status_code == 401:
-        raise PermissionError("PTS API 令牌无效或已过期")
-    if resp.status_code == 429:
-        raise RuntimeError("PTS API 请求过于频繁，请稍后再试")
-    if resp.status_code != 200:
-        raise RuntimeError(f"PTS API 返回 HTTP {resp.status_code}: {resp.text[:200]}")
+    for attempt in range(max_retries + 1):
+        await _rate_limit()
 
-    data = resp.json()
-    if data.get("errors"):
-        error_msg = data["errors"][0].get("message", str(data["errors"]))
-        raise RuntimeError(f"GraphQL 错误: {error_msg}")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                settings.pts_graphql_url,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {settings.pts_api_token}",
+                },
+                json={"query": inlined_query},
+            )
 
-    return data.get("data", {})
+        if resp.status_code == 401:
+            raise PermissionError("PTS API 令牌无效或已过期")
+        if resp.status_code == 429:
+            if attempt < max_retries:
+                wait = 5 * (2 ** attempt)  # 5s, 10s, 20s
+                logger.warning("PTS API rate limited (429), retrying in %ds (attempt %d/%d)", wait, attempt + 1, max_retries)
+                await asyncio.sleep(wait)
+                continue
+            raise RuntimeError("PTS API 请求过于频繁，请稍后再试")
+        if resp.status_code != 200:
+            raise RuntimeError(f"PTS API 返回 HTTP {resp.status_code}: {resp.text[:200]}")
+
+        data = resp.json()
+        if data.get("errors"):
+            error_msg = data["errors"][0].get("message", str(data["errors"]))
+            raise RuntimeError(f"GraphQL 错误: {error_msg}")
+
+        return data.get("data", {})
+
+    raise RuntimeError("PTS API 请求过于频繁，请稍后再试")
 
 
 async def verify_pts_token() -> bool:
@@ -158,10 +170,17 @@ async def query_inspection_work_orders(sync_month: str) -> list[dict]:
     - plan_complete_date: within the given month (YYYY-MM)
     - is_finished: false (未闭环 only)
     - delivery.after_sale.name == "冯伟" (售后负责人为冯伟)
+
+    Optimization: sort DESCENDING by plan_complete_date so newest data comes first,
+    and stop pagination once we've passed the target month (no more matches possible).
     """
+    from datetime import datetime, timedelta
+    from services.aitable_fields import COMPLETION_STAGES
+
     all_items = []
     skip = 0
     limit = 50
+    past_target_month = False
 
     while True:
         query = """
@@ -169,7 +188,7 @@ async def query_inspection_work_orders(sync_month: str) -> list[dict]:
           listWorkOrder(
             search: { type: [expert_service__product_inspection, expert_service__log_analysis] }
             pagination: { skip: %%SKIP%%, limit: %%LIMIT%% }
-            sort: { sort: 1, by: "plan_complete_date" }
+            sort: { sort: -1, by: "plan_complete_date" }
           ) {
             total
             data {
@@ -210,16 +229,31 @@ async def query_inspection_work_orders(sync_month: str) -> list[dict]:
         if not items:
             break
 
-        all_items.extend(items)
-        skip += limit
+        # Check if all items in this page are before the target month (descending order)
+        # If so, no more matching data can be found in subsequent pages
+        for item in items:
+            plan = item.get("plan_complete_date", "")
+            if not plan:
+                all_items.append(item)
+                continue
+            try:
+                utc_dt = datetime.fromisoformat(plan.replace("Z", "+00:00"))
+                cn_month = (utc_dt + timedelta(hours=8)).strftime("%Y-%m")
+                if cn_month < sync_month:
+                    past_target_month = True
+                    break
+            except (ValueError, TypeError):
+                pass
+            all_items.append(item)
 
+        if past_target_month:
+            break
+
+        skip += limit
         if skip >= total:
             break
 
     # Local filter: plan_complete_date in the given month (UTC+8) AND not finished AND after_sale is 冯伟 AND not in completion stage
-    from datetime import datetime, timedelta
-    from services.aitable_fields import COMPLETION_STAGES
-
     filtered = []
     for item in all_items:
         plan = item.get("plan_complete_date", "")
@@ -255,6 +289,35 @@ async def query_inspection_work_orders(sync_month: str) -> list[dict]:
         len(all_items), len(filtered), sync_month,
     )
     return filtered
+
+
+async def update_work_order_plan_complete_date(work_order_id: str, plan_complete_date_utc: str) -> bool:
+    """Update a PTS work order's plan_complete_date via mutation.
+
+    Args:
+        work_order_id: PTS work order ID
+        plan_complete_date_utc: UTC datetime string, e.g. "2026-06-29T16:00:00Z"
+            (represents 2026-06-30 00:00 Beijing time)
+
+    Returns:
+        True on success, False on failure.
+    """
+    mutation = """
+    mutation {
+      update_work_order(id: "%s", input: { plan_complete_date: "%s" })
+    }
+    """ % (work_order_id, plan_complete_date_utc)
+
+    try:
+        result = await pts_graphql_query(mutation)
+        # update_work_order returns Boolean (null/true on success, errors on failure)
+        if result.get("errors"):
+            logger.error("PTS update_work_order failed for %s: %s", work_order_id, result["errors"])
+            return False
+        return True
+    except Exception as e:
+        logger.error("PTS update_work_order exception for %s: %s", work_order_id, e)
+        return False
 
 
 async def add_work_order_info(work_order_id: str, note: str = "") -> bool:

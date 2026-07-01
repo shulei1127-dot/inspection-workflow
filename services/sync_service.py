@@ -7,6 +7,7 @@ Core flow:
 4. Record sync_log
 """
 
+import asyncio
 import logging
 import uuid
 from datetime import date, datetime, timezone
@@ -563,6 +564,202 @@ def _work_order_to_cells(wo: WorkOrder) -> dict:
         cells[DISPATCH["销售"]] = wo.sales_name
 
     return cells
+
+
+async def adjust_planned_completion_to_month_end(
+    db: Session,
+    *,
+    work_order_ids: list[str] | None = None,
+    month: str | None = None,
+) -> dict:
+    """Adjust planned_completion to the last day of its month for selected work orders."""
+    q = db.query(WorkOrder)
+
+    if work_order_ids:
+        uuids = []
+        for wid in work_order_ids:
+            try:
+                uuids.append(uuid.UUID(wid))
+            except ValueError:
+                continue
+        q = q.filter(WorkOrder.id.in_(uuids))
+    elif month:
+        parts = month.split("-")
+        year, m = int(parts[0]), int(parts[1])
+        last_day = calendar.monthrange(year, m)[1]
+        start_date = date(year, m, 1)
+        end_date = date(year, m, last_day)
+        q = q.filter(
+            WorkOrder.planned_completion >= start_date,
+            WorkOrder.planned_completion <= end_date,
+        )
+    else:
+        raise ValueError("Must provide work_order_ids or month")
+
+    q = q.filter(WorkOrder.planned_completion_adjusted == False)  # noqa: E712
+    orders = q.all()
+
+    adjusted = 0
+    skipped = 0
+
+    for wo in orders:
+        if wo.planned_completion is None:
+            skipped += 1
+            continue
+
+        y, m = wo.planned_completion.year, wo.planned_completion.month
+        last_day = calendar.monthrange(y, m)[1]
+        new_date = date(y, m, last_day)
+
+        if wo.planned_completion == new_date:
+            skipped += 1
+            continue
+
+        wo.planned_completion = new_date
+        wo.planned_completion_adjusted = True
+        adjusted += 1
+
+    db.commit()
+
+    # Update PTS work orders' plan_complete_date
+    pts_updated = 0
+    pts_failed = 0
+    if adjusted > 0:
+        pts_updated, pts_failed = await _update_pts_planned_completion(orders)
+
+    # Best-effort: update DAILY_SERVICE AITable records
+    aitable_updated = 0
+    aitable_failed = 0
+    if adjusted > 0:
+        aitable_updated, aitable_failed = await _update_aitable_planned_completion(db, orders)
+
+    logger.info(
+        "Adjusted planned_completion: %d adjusted, %d skipped, PTS %d updated / %d failed, AITable %d updated / %d failed",
+        adjusted, skipped, pts_updated, pts_failed, aitable_updated, aitable_failed,
+    )
+
+    return {
+        "status": "success",
+        "adjusted": adjusted,
+        "skipped": skipped,
+        "pts_updated": pts_updated,
+        "pts_failed": pts_failed,
+        "aitable_updated": aitable_updated,
+        "aitable_failed": aitable_failed,
+    }
+
+
+async def _update_pts_planned_completion(orders: list[WorkOrder]) -> tuple[int, int]:
+    """Update PTS work orders' plan_complete_date to the last day of the month.
+
+    Converts local date to UTC datetime string required by PTS API:
+    Beijing time month last day 00:00 → UTC month last day minus 1 day 16:00.
+    """
+    from datetime import timedelta
+    from services.pts_client import update_work_order_plan_complete_date
+
+    updated = 0
+    failed = 0
+
+    # Only process orders that were actually adjusted
+    adjusted_orders = [wo for wo in orders if wo.planned_completion_adjusted]
+    if not adjusted_orders:
+        return 0, 0
+
+    for wo in adjusted_orders:
+        if not wo.planned_completion or not wo.pts_order_id:
+            continue
+
+        # Convert: Beijing time last day 00:00 → UTC (subtract 8 hours)
+        bj_last_day = wo.planned_completion  # already set to month last day
+        utc_dt = datetime(bj_last_day.year, bj_last_day.month, bj_last_day.day, 0, 0, 0) - timedelta(hours=8)
+        utc_str = utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        success = await update_work_order_plan_complete_date(wo.pts_order_id, utc_str)
+        if success:
+            updated += 1
+            logger.info("PTS plan_complete_date updated for %s → %s", wo.pts_order_id, utc_str)
+        else:
+            failed += 1
+            logger.warning("PTS plan_complete_date update failed for %s", wo.pts_order_id)
+
+        # Rate limit: max 5 requests per second per PTS token
+        await asyncio.sleep(0.25)
+
+    return updated, failed
+
+
+async def _update_aitable_planned_completion(db: Session, orders: list[WorkOrder]) -> tuple[int, int]:
+    """Best-effort update of planned_completion in DAILY_SERVICE AITable table."""
+    import re
+    from services.aitable_fields import DAILY_SERVICE
+
+    settings = get_settings()
+    if not settings.dt_aitable_base_id or not settings.dt_aitable_table_id:
+        return 0, 0
+
+    # Only process orders that were actually adjusted
+    adjusted_orders = [wo for wo in orders if wo.planned_completion_adjusted]
+    if not adjusted_orders:
+        return 0, 0
+
+    try:
+        records = await dingtalk_client.query_records(
+            limit=1000,
+            base_id=settings.dt_aitable_base_id,
+            table_id=settings.dt_aitable_table_id,
+            fetch_all=True,
+        )
+    except Exception as e:
+        logger.error("Failed to query DAILY_SERVICE AITable for planned_completion update: %s", e)
+        return 0, len(adjusted_orders)
+
+    # Build lookup: pts_order_id → record_id
+    aitable_lookup: dict[str, str] = {}
+    for record in records:
+        cells = record.get("cells", {})
+        link_val = cells.get(DAILY_SERVICE.get("巡检工单链接", ""))
+        url = None
+        if isinstance(link_val, dict):
+            url = link_val.get("link") or link_val.get("text", "")
+        elif isinstance(link_val, str) and link_val.startswith("http"):
+            url = link_val
+
+        if not url:
+            continue
+
+        match = re.search(r'/project/order/([^/?]+)', url)
+        if match:
+            aitable_lookup[match.group(1)] = record.get("recordId", "")
+
+    field_id = DAILY_SERVICE.get("工单计划完成时间")
+    if not field_id:
+        logger.warning("DAILY_SERVICE field ID for 工单计划完成时间 not found")
+        return 0, len(adjusted_orders)
+
+    updated = 0
+    failed = 0
+
+    for wo in adjusted_orders:
+        if wo.pts_order_id not in aitable_lookup:
+            failed += 1
+            continue
+
+        try:
+            await dingtalk_client.update_records(
+                [{
+                    "recordId": aitable_lookup[wo.pts_order_id],
+                    "cells": {field_id: wo.planned_completion.isoformat() if wo.planned_completion else ""},
+                }],
+                base_id=settings.dt_aitable_base_id,
+                table_id=settings.dt_aitable_table_id,
+            )
+            updated += 1
+        except Exception as e:
+            logger.error("Failed to update AITable planned_completion for %s: %s", wo.pts_order_id, e)
+            failed += 1
+
+    return updated, failed
 
 
 async def _update_closure_status_from_aitable(db: Session) -> None:

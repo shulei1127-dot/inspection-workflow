@@ -14,6 +14,7 @@ class SyncLog(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     trigger_source: Mapped[str] = mapped_column(String(32), nullable=False)
     sync_month: Mapped[str] = mapped_column(String(7), nullable=False)
+    sync_type: Mapped[str] = mapped_column(String(32), nullable=False, default="full_sync")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
     fetched_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

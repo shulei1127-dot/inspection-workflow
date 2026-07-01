@@ -106,6 +106,8 @@ async def query_records(
     base_id: str | None = None,
     table_id: str | None = None,
     fetch_all: bool = False,
+    filters: str | None = None,
+    field_ids: str | None = None,
 ) -> list[dict]:
     """Query records from the configured AITable.
 
@@ -114,6 +116,10 @@ async def query_records(
         base_id: Override base ID.
         table_id: Override table ID.
         fetch_all: If True, paginate through all records automatically.
+        filters: Server-side filter JSON (e.g. '{"operator":"and","operands":[...]}').
+                 Reduces records returned by AITable before local filtering.
+        field_ids: Comma-separated field IDs to return (projection).
+                   Reduces payload size by only fetching needed columns.
     """
     page_limit = min(limit, 100)  # AITable API limit max is 100
     all_records = []
@@ -128,6 +134,10 @@ async def query_records(
         ]
         if cursor:
             args.extend(["--cursor", cursor])
+        if filters:
+            args.extend(["--filters", filters])
+        if field_ids:
+            args.extend(["--field-ids", field_ids])
 
         logger.debug("query_records args: %s", args)
         result = await _run_dws(args)

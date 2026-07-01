@@ -52,3 +52,6 @@ class EmailPreAnalysis(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     refreshed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
+
+    # Whether email has been sent from this pre-analysis record
+    email_sent: Mapped[bool] = mapped_column(default=False, nullable=False)

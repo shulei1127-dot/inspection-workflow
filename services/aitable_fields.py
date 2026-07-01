@@ -128,7 +128,7 @@ COMPLETION_STAGES = {"审核工单", "已闭环"}
 
 
 def current_month() -> str:
-    """Return the current month in YYYY-MM format (UTC)."""
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc)
+    """Return the current month in YYYY-MM format (Asia/Shanghai, UTC+8)."""
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone(timedelta(hours=8)))
     return now.strftime("%Y-%m")

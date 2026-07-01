@@ -1,0 +1,75 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: inspection-workflow-app-1
+    ports:
+      - "8100:8100"
+    environment:
+      - DATABASE_URL=postgresql+psycopg://inspection:inspection@db:5432/inspection_workflow
+      - PTS_API_TOKEN=${PTS_API_TOKEN}
+      - PTS_GRAPHQL_URL=${PTS_GRAPHQL_URL:-http://10.9.255.197/pts/query}
+      - PTS_SESSION_COOKIE=${PTS_SESSION_COOKIE:-}
+      - PTS_RATE_LIMIT=${PTS_RATE_LIMIT:-4.0}
+      - AI_API_KEY=${AI_API_KEY}
+      - DT_AITABLE_BASE_ID=${DT_AITABLE_BASE_ID}
+      - DT_AITABLE_TABLE_ID=${DT_AITABLE_TABLE_ID}
+      - DT_DISPATCH_BASE_ID=${DT_DISPATCH_BASE_ID}
+      - DT_DISPATCH_TABLE_ID=${DT_DISPATCH_TABLE_ID}
+      - YUNJI_SESSION_COOKIE=${YUNJI_SESSION_COOKIE:-}
+      - INSPECTION_EMAIL_SMTP_HOST=${INSPECTION_EMAIL_SMTP_HOST:-smtpdm.aliyun.com}
+      - INSPECTION_EMAIL_SMTP_PORT=${INSPECTION_EMAIL_SMTP_PORT:-465}
+      - INSPECTION_EMAIL_SENDER=${INSPECTION_EMAIL_SENDER:-inspection@product-support.chaitin.com}
+      - INSPECTION_EMAIL_PASSWORD=${INSPECTION_EMAIL_PASSWORD:-}
+      - AUTO_DISPATCH_ENABLED=${AUTO_DISPATCH_ENABLED:-false}
+      - AUTO_EMAIL_ENABLED=${AUTO_EMAIL_ENABLED:-false}
+      - SCHEDULER_ENABLED=${SCHEDULER_ENABLED:-true}
+      - DT_POLL_ENABLED=${DT_POLL_ENABLED:-true}
+      - DT_POLL_INTERVAL=${DT_POLL_INTERVAL:-7200}
+      - EMAIL_PROBE_CRON=${EMAIL_PROBE_CRON:-0 */2 * * *}
+      - SYNC_CRON=${SYNC_CRON:-0 16 * * *}
+      - EMAIL_PRE_ANALYSIS_ENABLED=${EMAIL_PRE_ANALYSIS_ENABLED:-false}
+      - EMAIL_PRE_ANALYSIS_CRON=${EMAIL_PRE_ANALYSIS_CRON:-0 9 * * *}
+      - DINGTALK_WEBHOOK_URL=${DINGTALK_WEBHOOK_URL:-}
+      - DINGTALK_SECRET=${DINGTALK_SECRET:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - SERVER_PORT=8100
+      # Review (交付转售后审核)
+      - REVIEW_PIPELINE_ENABLED=${REVIEW_PIPELINE_ENABLED:-true}
+      - REVIEW_REAL_EXECUTION_ENABLED=${REVIEW_REAL_EXECUTION_ENABLED:-true}
+      - REVIEW_WRITEBACK_ENABLED=${REVIEW_WRITEBACK_ENABLED:-true}
+      - PTS_REVIEW_API_TOKEN=${PTS_REVIEW_API_TOKEN:-}
+      - PTS_REVIEW_APPROVAL_API_KEY=${PTS_REVIEW_APPROVAL_API_KEY:-pt_357e3fd3828511294c8dead0b8e278c3ad7bc2a11a05372c77ad30853d314d52}
+      - PTS_REVIEW_AFTER_SALE_FILTER_IDS=${PTS_REVIEW_AFTER_SALE_FILTER_IDS:-}
+    volumes:
+      - /root/.local/share/dws-cli:/root/.local/share/dws-cli
+      - /root/.dws:/root/.dws
+      - dws-config:/root/.config/dws
+      - email-tool-data:/app/email_tool/data
+      - ./.git:/app/.git:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres:16
+    container_name: inspection-workflow-db-1
+    environment:
+      - POSTGRES_USER=inspection
+      - POSTGRES_PASSWORD=inspection
+      - POSTGRES_DB=inspection_workflow
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inspection -d inspection_workflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  dws-config:
+  email-tool-data:

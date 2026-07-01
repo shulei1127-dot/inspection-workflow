@@ -93,6 +93,12 @@ export const getPreAnalysisStatus = () =>
 export const runPreAnalysis = () =>
   fetch('/api/email-tool/pre-analysis/run', { method: 'POST' }).then(r => r.json())
 
+export const reAnalyzeRecord = (recordId: string) =>
+  fetch(`/api/email-tool/pre-analysis/re-analyze/${recordId}`, { method: 'POST' }).then(r => r.json())
+
+export const previewEmailContent = (recordId: string) =>
+  fetchJson(`/api/email-tool/preview/${recordId}`)
+
 export const sendDirectEmail = (data: { record_id: string; extra_emails?: string }) =>
   fetch('/api/email-tool/send-direct', {
     method: 'POST',
@@ -123,6 +129,9 @@ export const pushToDingtalk = (syncMonth?: string) =>
 
 export const batchPushToDingtalk = (data: { work_order_ids: string[] }) =>
   postJson('/api/sync/batch-push', data)
+
+export const adjustPlannedCompletion = (data: { work_order_ids?: string[]; month?: string }) =>
+  postJson('/api/work-orders/adjust-planned-completion', data)
 
 export const getSyncLogs = (limit = 50) =>
   fetchJson(`/api/sync/logs?limit=${limit}`)
@@ -160,3 +169,55 @@ export const getAuditLogs = (params: Record<string, any> = {}) => {
 export const runReview = () => postJson('/api/review/run')
 
 export const getPendingProjects = () => fetchJson('/api/review/pending')
+
+export const auditSingleProject = (projectId: string) =>
+  postJson(`/api/review/audit/${encodeURIComponent(projectId)}`)
+
+// ── Change Logs (知识库变更) ──
+export const getChangeLogs = (params: Record<string, any> = {}) => {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') qs.set(k, String(v))
+  }
+  return fetchJson('/api/change-logs?' + qs.toString())
+}
+
+export const createChangeLog = (data: { change_date: string; category: string; title: string; detail?: string; author?: string }) =>
+  postJson('/api/change-logs', data)
+
+export const deleteChangeLog = (id: string) =>
+  fetchJson('/api/change-logs/' + id, { method: 'DELETE' })
+
+export const collectChangeLogs = (date: string) =>
+  postJson('/api/change-logs/collect?date=' + date)
+
+export const pushDailyChangeLogs = (date: string, force = false) =>
+  postJson('/api/change-logs/push-daily?date=' + date + (force ? '&force=true' : ''))
+
+export const getChangeLogSummary = (date: string) =>
+  fetchJson('/api/change-logs/summary?date=' + date)
+
+// ── Task Logs (任务日志) ──
+export const getTaskLogs = (taskType?: string, limit = 50) =>
+  fetchJson('/api/task-logs' + (taskType ? `?task_type=${taskType}&limit=${limit}` : `?limit=${limit}`))
+
+// ── Visit (交付转售后回访) ──
+export const triggerVisit = (projectId: string) =>
+  postJson(`/api/visit/run/${encodeURIComponent(projectId)}`)
+
+export const retryVisit = (visitLogId: string) =>
+  postJson(`/api/visit/retry/${visitLogId}`)
+
+export const getVisitLogs = (params: Record<string, any> = {}) => {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') qs.set(k, String(v))
+  }
+  return fetchJson('/api/visit/logs?' + qs.toString())
+}
+
+export const getVisitDetail = (visitLogId: string) =>
+  fetchJson(`/api/visit/${visitLogId}`)
+
+export const batchTriggerVisits = () =>
+  postJson('/api/visit/batch')

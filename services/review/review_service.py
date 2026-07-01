@@ -80,7 +80,7 @@ async def run_review_pipeline(
 
     for project in projects:
         try:
-            result = await _audit_single_project(project.project_id)
+            result = await audit_single_project(project.project_id)
             # 保存审核日志
             _save_audit_log(db, project.project_id, project.project_name, project.customer_name, result, trigger_source)
             db.commit()
@@ -129,8 +129,17 @@ async def run_review_pipeline(
     return {"status": "success", **summary, "results": results}
 
 
-async def _audit_single_project(project_id: str) -> dict[str, Any]:
+async def audit_single_project(project_id: str) -> dict[str, Any]:
     """对单个项目执行完整审核流程。"""
+    # 前置检查
+    settings = get_settings()
+    if not settings.review_real_execution_enabled:
+        return {
+            "project_id": project_id,
+            "error": "review_real_execution_enabled 未启用",
+            "conclusion": "error",
+        }
+
     # Step 1: 采集项目详情
     try:
         project_data = await extract_project_data(project_id)

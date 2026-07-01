@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from core.db import get_db
 from models.sync_log import SyncLog
 from models.work_order import WorkOrder
-from services.sync_service import run_sync, push_to_aitable, _sync_to_aitable, current_month
+from services.sync_service import run_sync, push_to_aitable, _sync_to_aitable, adjust_planned_completion_to_month_end, current_month
 from apps.api.utils import fmt_cst
 
 logger = logging.getLogger(__name__)
@@ -25,10 +25,15 @@ class BatchPushRequest(BaseModel):
 @router.post("/api/sync/run")
 async def trigger_sync(
     sync_month: str | None = Query(None, description="同步月份，格式 YYYY-MM，默认当月"),
+    push: bool = Query(True, description="是否同时推送到钉钉AITable"),
     db: Session = Depends(get_db),
 ):
-    """Pull PTS work orders to local DB (without pushing to DingTalk AITable)."""
-    log = await run_sync(db, trigger_source="manual", sync_month=sync_month, push_to_aitable=False)
+    """Pull PTS work orders to local DB and optionally push to DingTalk AITable."""
+    log = await run_sync(db, trigger_source="manual", sync_month=sync_month, push_to_aitable=push)
+
+    # Auto-adjust planned completion to month end
+    adjust_result = await adjust_planned_completion_to_month_end(db, month=log.sync_month)
+
     return {
         "status": log.status,
         "sync_month": log.sync_month,
@@ -37,6 +42,7 @@ async def trigger_sync(
         "updated_count": log.updated_count,
         "skipped_count": log.skipped_count,
         "error_message": log.error_message,
+        "adjust_result": adjust_result,
     }
 
 
