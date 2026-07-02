@@ -531,12 +531,83 @@ async function handleReExtract() {
   await handleExtract()
 }
 
+/** Normalize whitespace for dedup comparison (collapse multiple spaces/newlines into one) */
+function normalizeText(s: string): string {
+  return s.replace(/\s+/g, ' ').trim()
+}
+
+/** Format summary text: add line breaks before numbered items for readability */
+function formatSummary(summary: string): string {
+  if (!summary) return summary
+  // Add newline before Chinese enumeration: 1、 2、 3、 etc.
+  let s = summary.replace(/(?<!\d)(\d{1,2})[、]\s*/g, '\n$1、')
+  // Add newline before Arabic enumeration: 1. 2. etc. (avoid version numbers)
+  s = s.replace(/(?<![\d.])(\d{1,2})\.\s+/g, '\n$1. ')
+  // Add newline before section markers like "灾备区域WAF："
+  s = s.replace(/([。；])\s*([^\d\n]+?(?:WAF|区域)[：:])/g, '$1\n$2')
+  return s.trim()
+}
+
+/** Consolidate summaries: merge duplicate product entries, dedup near-identical summaries */
+function consolidateSummaries(summaries: { product: string; summary: string }[]): { product: string; summary: string }[] {
+  if (!summaries || summaries.length <= 1) return summaries
+
+  const PRODUCT_KEYWORDS = ['雷池', '洞鉴', '谛听', '牧云', '万象']
+
+  // Group by normalized product name
+  const productOrder: string[] = []
+  const productSummaries: Record<string, string[]> = {}
+
+  for (const s of summaries) {
+    let prod = s.product || '产品'
+    for (const kw of PRODUCT_KEYWORDS) {
+      if (prod.includes(kw)) { prod = kw; break }
+    }
+    if (!productOrder.includes(prod)) productOrder.push(prod)
+    if (s.summary) {
+      productSummaries[prod] = productSummaries[prod] || []
+      productSummaries[prod].push(s.summary)
+    }
+  }
+
+  // Dedup within each product group
+  const result: { product: string; summary: string }[] = []
+  for (const prod of productOrder) {
+    const sumList = productSummaries[prod] || []
+    if (sumList.length === 0) {
+      result.push({ product: prod, summary: '' })
+      continue
+    }
+    // Deduplicate: remove near-identical summaries
+    const unique: string[] = []
+    const seenNorms: string[] = []
+    for (const s of sumList) {
+      const norm = normalizeText(s)
+      const isDup = seenNorms.some(u => {
+        // Exact match after whitespace normalization
+        if (norm === u) return true
+        // Substring containment (one fully contains the other)
+        const shorter = norm.length <= u.length ? norm : u
+        const longer = norm.length <= u.length ? u : norm
+        if (shorter.length > 20 && longer.includes(shorter)) return true
+        return false
+      })
+      if (!isDup) { unique.push(s); seenNorms.push(norm) }
+    }
+    result.push({ product: prod, summary: formatSummary(unique.join('\n\n')) })
+  }
+  return result
+}
+
 function generateEmailContent() {
+  // Consolidate summaries first: merge duplicate products, dedup
+  const consolidated = consolidateSummaries(form.summaries)
+
   let combinedSummary = ''
-  if (form.summaries.length === 1) {
-    combinedSummary = form.summaries[0].summary
+  if (consolidated.length === 1) {
+    combinedSummary = consolidated[0].summary
   } else {
-    combinedSummary = form.summaries
+    combinedSummary = consolidated
       .filter(s => s.summary)
       .map(s => `【${s.product}】\n${s.summary}`)
       .join('\n\n')

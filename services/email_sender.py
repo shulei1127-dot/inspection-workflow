@@ -22,12 +22,27 @@ logger = logging.getLogger(__name__)
 
 
 def _get_name_pinyin(name: str) -> str:
-    """Convert Chinese name to pinyin email format: 舒磊 -> lei.shu@chaitin.com"""
+    """Convert Chinese name to pinyin email format: 舒磊 -> lei.shu@chaitin.com, 杨振兴 -> zhenxing.yang@chaitin.com"""
     try:
         from pypinyin import pinyin, Style
+        # Common surname multi-sound corrections: pypinyin defaults to wrong pronunciation
+        _SURNAME_CORRECTIONS = {
+            "单": "shan",  # 常见姓氏读音"shàn"，pypinyin默认误读为"dān"
+            "曾": "zeng",  # 常见姓氏读音"zēng"，部分场景误读为"ceng"
+            "解": "xie",   # 常见姓氏读音"xiè"
+            "查": "zha",   # 常见姓氏读音"zhā"
+            "覃": "qin",   # 常见姓氏读音"qín"
+            "盖": "ge",    # 常见姓氏读音"gě"
+        }
         parts = pinyin(name, style=Style.NORMAL)
         if len(parts) >= 2:
-            return f"{parts[1][0]}.{parts[0][0]}@chaitin.com"
+            surname = parts[0][0]
+            # Correct surname pronunciation if needed
+            first_char = name[0]
+            if first_char in _SURNAME_CORRECTIONS:
+                surname = _SURNAME_CORRECTIONS[first_char]
+            given = "".join(p[0] for p in parts[1:])
+            return f"{given}.{surname}@chaitin.com"
         elif len(parts) == 1:
             return f"{parts[0][0]}@chaitin.com"
     except ImportError:
@@ -51,10 +66,10 @@ def extract_info_with_ai(text: str) -> tuple[dict | None, str | None]:
         prompt = f"""你是一个信息提取助手。请从以下巡检报告文本中提取以下信息：
 1. 客户名称（公司全称）
 2. 产品名称（谛听/洞鉴/雷池等）
-3. 巡检时间（格式化为 YYYY-MM-DD）
+3. 巡检时间（格式化为 YYYY-MM-DD）。注意：PDF中可能包含模板创建日期（通常出现在页眉或封面副标题，格式较旧如2024年），这不是实际巡检时间。实际巡检时间通常出现在报告标题附近或正文首段，且应是最近的日期。请优先选择标题旁或正文首段出现的日期，而非页眉/封面中较旧的模板日期。
 4. 巡检数量（如"1套"、"4台"等，保留数字和单位）
 5. 客户邮箱（可能有多个，也可能没有）
-6. 巡检总结（报告中的总结段落，完整提取）
+6. 巡检总结：提取报告中"事件记录/巡检结果及建议"或"巡检结论"部分的完整段落内容。该内容通常出现在报告末尾的"设备巡检信息汇总"表格中，是"事件记录"行对应"巡检结果及建议"列的文字，包含编号列表（如1、2、3等）的具体巡检发现和建议。如果找不到该部分，则提取"巡检结果概要"章节的内容。不要只提取"此次共巡检了X台设备"这类一句话概括，必须保留原文的编号列表格式和换行，不要合并为一段连续文字。
 
 请严格按以下 JSON 格式返回，不要包含任何其他内容：
 {{"customer_name": "","product_name": "","inspection_date": "","quantity": "","emails": [],"summary": ""}}
@@ -86,15 +101,17 @@ def send_email(
     body: str,
     attachments: list[tuple[str, bytes]] | None = None,
     cc_emails: str = "",
+    body_type: str = "plain",
 ) -> tuple[bool, str]:
     """Send email via SMTP_SSL.
 
     Args:
         to_emails: List of recipient email addresses
         subject: Email subject
-        body: Email body (plain text)
+        body: Email body
         attachments: List of (filename, bytes) tuples
         cc_emails: Comma-separated CC addresses
+        body_type: "plain" or "html"
 
     Returns (success, message)
     """
@@ -108,6 +125,11 @@ def send_email(
         return False, "SMTP 配置不完整"
 
     try:
+        # Clean email addresses: strip whitespace and remove any embedded newlines
+        to_emails = [e.replace("\n", "").replace("\r", "").strip() for e in to_emails if e and "@" in e]
+        if not to_emails:
+            return False, "收件人邮箱列表为空"
+
         msg = MIMEMultipart()
         msg["From"] = formataddr((str(Header("长亭科技", "utf-8")), sender_email))
         msg["To"] = ", ".join(to_emails)
@@ -115,7 +137,7 @@ def send_email(
             msg["Cc"] = cc_emails
         msg["Subject"] = Header(subject, "utf-8")
 
-        msg.attach(MIMEText(body, "plain", "utf-8"))
+        msg.attach(MIMEText(body, body_type, "utf-8"))
 
         if attachments:
             for attachment_name, attachment_bytes in attachments:
@@ -127,7 +149,7 @@ def send_email(
 
         with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
             server.login(sender_email, sender_password)
-            server.sendmail(sender_email, all_recipients, msg.as_string())
+            server.sendmail(sender_email, all_recipients, msg.as_bytes())
 
         return True, "发送成功"
     except Exception as e:

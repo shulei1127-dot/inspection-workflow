@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from core.db import get_db
 from services.email_sender import send_email, extract_info_with_ai
+from services.email_pre_analysis import _merge_multi_report_results
 
 logger = logging.getLogger(__name__)
 
@@ -19,73 +20,6 @@ router = APIRouter(tags=["email-tool"])
 # In-memory store for uploaded files (per session)
 # Key: file_id, Value: {filename, content, uploaded_at}
 _upload_store: dict[str, dict] = {}
-
-
-def _merge_multi_report_results(ai_infos: list[dict]) -> dict:
-    """Merge AI extraction results from multiple PDF reports.
-
-    Returns merged dict with: customer_name, product_name, quantity, emails,
-    summary, summaries.
-    """
-    if not ai_infos:
-        return {}
-
-    if len(ai_infos) == 1:
-        info = ai_infos[0]
-        product = info.get("product_name", "产品")
-        summary = info.get("summary", "")
-        return {
-            "customer_name": info.get("customer_name", ""),
-            "product_name": product,
-            "quantity": info.get("quantity", ""),
-            "emails": info.get("emails", []),
-            "summary": summary,
-            "summaries": [{"product": product, "summary": summary}],
-        }
-
-    # Multiple reports: merge with same logic as Streamlit
-    customer_name = ""
-    product_names = []
-    products_with_quantity = []
-    all_emails = []
-    summaries = []
-
-    for info in ai_infos:
-        # customer_name: take first non-empty
-        if not customer_name and info.get("customer_name"):
-            customer_name = info["customer_name"]
-
-        prod = info.get("product_name", "")
-        if prod:
-            product_names.append(prod)
-
-        qty = info.get("quantity", "")
-        if qty and prod:
-            products_with_quantity.append(f"{qty}{prod}")
-        elif prod:
-            products_with_quantity.append(prod)
-
-        if info.get("emails"):
-            all_emails.extend(info["emails"])
-
-        summaries.append({
-            "product": prod or "产品",
-            "summary": info.get("summary", ""),
-        })
-
-    # summary: single report → direct; multi → segmented by product
-    summary = "\n\n".join(
-        f"【{s['product']}】\n{s['summary']}" for s in summaries if s["summary"]
-    )
-
-    return {
-        "customer_name": customer_name,
-        "product_name": "、".join(product_names) if product_names else "",
-        "quantity": "、".join(products_with_quantity) if products_with_quantity else "",
-        "emails": list(dict.fromkeys(all_emails)),  # dedupe, preserve order
-        "summary": summary,
-        "summaries": summaries,
-    }
 
 
 @router.post("/api/email-tool/extract")

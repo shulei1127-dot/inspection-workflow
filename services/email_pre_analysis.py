@@ -55,6 +55,9 @@ def _merge_multi_report_results(ai_infos: list[dict]) -> dict:
 
     Returns merged dict with: customer_name, product_name, quantity, emails,
     summary, summaries.
+
+    When the same product appears in multiple PDFs, quantities are aggregated
+    and duplicated summaries are removed.
     """
     if not ai_infos:
         return {}
@@ -63,6 +66,9 @@ def _merge_multi_report_results(ai_infos: list[dict]) -> dict:
         info = ai_infos[0]
         product = info.get("product_name", "产品")
         summary = info.get("summary", "")
+        # AI may return summary as a list of strings — join with newlines
+        if isinstance(summary, list):
+            summary = "\n".join(str(s) for s in summary if s)
         return {
             "customer_name": info.get("customer_name", ""),
             "product_name": product,
@@ -73,33 +79,85 @@ def _merge_multi_report_results(ai_infos: list[dict]) -> dict:
         }
 
     # Multiple reports: merge with same logic as Streamlit
-    customer_name = ""
-    product_names = []
-    products_with_quantity = []
-    all_emails = []
-    summaries = []
+    # Filter out non-report PDFs (e.g. syslog guides) that have no summary and no date
+    valid_infos = [
+        info for info in ai_infos
+        if info.get("summary") or info.get("inspection_date") or info.get("customer_name")
+    ]
+    if not valid_infos:
+        valid_infos = ai_infos  # Fallback: use all if none match
 
-    for info in ai_infos:
+    customer_name = ""
+    product_order: list[str] = []
+    product_quantities: dict[str, list[str]] = {}  # product → [quantity_str, ...]
+    all_emails: list[str] = []
+    product_summaries: dict[str, list[str]] = {}   # product → [summary, ...]
+
+    for info in valid_infos:
         if not customer_name and info.get("customer_name"):
             customer_name = info["customer_name"]
 
         prod = info.get("product_name", "")
-        if prod:
-            product_names.append(prod)
+        # Normalize product name — take the short keyword form
+        for kw in _PRODUCT_KEYWORDS:
+            if kw in prod:
+                prod = kw
+                break
+
+        if not prod:
+            prod = "产品"
+
+        if prod not in product_order:
+            product_order.append(prod)
 
         qty = info.get("quantity", "")
-        if qty and prod:
-            products_with_quantity.append(f"{qty}{prod}")
-        elif prod:
-            products_with_quantity.append(prod)
+        if qty:
+            product_quantities.setdefault(prod, []).append(qty)
 
         if info.get("emails"):
             all_emails.extend(info["emails"])
 
-        summaries.append({
-            "product": prod or "产品",
-            "summary": info.get("summary", ""),
-        })
+        s = info.get("summary", "")
+        # AI may return summary as a list of strings — join with newlines
+        if isinstance(s, list):
+            s = "\n".join(str(item) for item in s if item)
+        if s:
+            product_summaries.setdefault(prod, []).append(s)
+
+    # Build deduplicated summaries and quantities per product
+    summaries: list[dict] = []
+    products_with_quantity: list[str] = []
+
+    for prod in product_order:
+        qty_list = product_quantities.get(prod, [])
+        sum_list = product_summaries.get(prod, [])
+
+        if sum_list:
+            # Pair quantities with summaries; when summaries are duplicates,
+            # the corresponding quantities refer to the SAME devices and
+            # should NOT be aggregated.
+            unique = _deduplicate_summaries(sum_list)
+            unique_count = len(unique)
+            original_count = len(sum_list)
+
+            if unique_count == 1 or unique_count < original_count:
+                # Duplicates detected — use single quantity
+                merged_qty = qty_list[0] if qty_list else ""
+            else:
+                merged_qty = _merge_quantities(qty_list)
+
+            if merged_qty:
+                products_with_quantity.append(f"{merged_qty}{prod}")
+
+            merged_summary = _format_summary("\n\n".join(unique))
+            summaries.append({"product": prod, "summary": merged_summary})
+        elif qty_list:
+            merged_qty = _merge_quantities(qty_list)
+            products_with_quantity.append(f"{merged_qty}{prod}")
+            summaries.append({"product": prod, "summary": ""})
+        else:
+            products_with_quantity.append(prod)
+            summaries.append({"product": prod, "summary": ""})
 
     summary = "\n\n".join(
         f"【{s['product']}】\n{s['summary']}" for s in summaries if s["summary"]
@@ -107,12 +165,226 @@ def _merge_multi_report_results(ai_infos: list[dict]) -> dict:
 
     return {
         "customer_name": customer_name,
-        "product_name": "、".join(product_names) if product_names else "",
+        "product_name": "、".join(product_order) if product_order else "",
         "quantity": "、".join(products_with_quantity) if products_with_quantity else "",
         "emails": list(dict.fromkeys(all_emails)),
         "summary": summary,
         "summaries": summaries,
     }
+
+
+def _merge_quantities(quantities: list[str]) -> str:
+    """Aggregate quantity strings, e.g. ['四台','四台'] → '八台'.
+
+    Handles Chinese numerals (一～十) and Arabic digits, preserves unit suffix.
+    """
+    import re
+
+    # Map Chinese numerals to numbers
+    CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+              "十一": 11, "十二": 12, "十三": 13, "十四": 14, "十五": 15, "十六": 16, "十七": 17, "十八": 18, "十九": 19, "二十": 20}
+
+    NUM_CN = {v: k for k, v in CN_NUM.items()}
+
+    total = 0
+    unit = ""
+    for q in quantities:
+        q = q.strip()
+        # Try Chinese number + unit, e.g. "四台", "八台"
+        m = re.match(r'^([一二三四五六七八九十]+)(\S+)$', q)
+        if m:
+            total += CN_NUM.get(m.group(1), 1)
+            if not unit:
+                unit = m.group(2)
+            continue
+        # Try Arabic digit + unit, e.g. "4台", "8台"
+        m = re.match(r'^(\d+)(\S+)$', q)
+        if m:
+            total += int(m.group(1))
+            if not unit:
+                unit = m.group(2)
+            continue
+        # Can't parse, return first as-is
+        return quantities[0]
+
+    if total == 0:
+        return quantities[0]
+
+    # Convert back to original numeral style if input was Chinese
+    if all(re.match(r'^[一二三四五六七八九十]', q) for q in quantities):
+        if total in NUM_CN:
+            return f"{NUM_CN[total]}{unit}"
+    return f"{total}{unit}"
+
+
+def _deduplicate_summaries(summaries: list[str]) -> list[str]:
+    """Deduplicate near-identical summary texts.
+
+    Keeps only unique summaries; removes those that are substantially
+    similar to another (e.g. same content with minor whitespace/formatting
+    differences).
+    """
+    if not summaries:
+        return []
+    if len(summaries) == 1:
+        return summaries
+
+    import re
+    from difflib import SequenceMatcher
+
+    def _normalize(s: str) -> str:
+        """Collapse whitespace for robust comparison."""
+        return re.sub(r'\s+', ' ', s).strip()
+
+    result: list[str] = []
+    normalized_seen: list[str] = []
+
+    for s in summaries:
+        s = s.strip()
+        if not s:
+            continue
+        norm = _normalize(s)
+
+        is_dup = False
+        for seen_norm in normalized_seen:
+            # 1. Exact match after whitespace normalization
+            if norm == seen_norm:
+                is_dup = True
+                break
+            # 2. Substring containment (one contains the other, with sufficient length)
+            shorter, longer = (norm, seen_norm) if len(norm) <= len(seen_norm) else (seen_norm, norm)
+            if len(shorter) > 20 and shorter in longer:
+                is_dup = True
+                break
+            # 3. Fuzzy similarity: high sequence ratio → near-identical content
+            # Threshold 0.95 catches whitespace-only diffs but not
+            # genuinely different summaries (different devices/regions)
+            if SequenceMatcher(None, norm, seen_norm).ratio() >= 0.95:
+                is_dup = True
+                break
+
+        if not is_dup:
+            result.append(s)
+            normalized_seen.append(norm)
+
+    return result if result else [summaries[0]]
+
+
+def _format_summary(summary: str) -> str:
+    """Post-process summary text: add line breaks before numbered items.
+
+    AI-generated summaries often produce one long paragraph; this inserts
+    newlines before enumeration markers so the email body is readable.
+
+    e.g. "…WAF：1、站点防护…；2、规则…" → "…WAF：\n1、站点防护…；\n2、规则…"
+    """
+    import re
+    if not summary:
+        return summary
+
+    # Add newline before Chinese enumeration: 1、 2、 3、 etc.
+    # Uses negative lookbehind to avoid matching version digits (e.g. 5.10.15)
+    summary = re.sub(r'(?<!\d)(\d{1,2})、\s*', r'\n\1、', summary)
+
+    # Add newline before Arabic enumeration: 1. 2. etc.
+    # Avoid matching version numbers (preceded by digit or dot)
+    summary = re.sub(r'(?<![\d.])(\d{1,2})\.\s+', r'\n\1. ', summary)
+
+    # Add newline before section markers like "灾备区域WAF："
+    # Pattern: Chinese text ending with ： that follows a clause separator
+    summary = re.sub(r'(?<=[。；])\s*([一-鿿]+WAF[：:])', r'\n\1', summary)
+    summary = re.sub(r'(?<=[。；])\s*([一-鿿]+区域[：:])', r'\n\1', summary)
+
+    # Clean up leading/trailing whitespace
+    summary = summary.strip()
+
+    return summary
+
+
+def _consolidate_email_data(
+    summaries: list[dict] | None,
+    quantity: str = "",
+) -> tuple[list[dict], str]:
+    """Consolidate summaries and quantity at runtime to handle stale data.
+
+    Groups duplicate product entries, deduplicates summaries within each
+    product, and re-aggregates quantities (e.g. "四台雷池、四台雷池" → "八台雷池").
+
+    Returns (consolidated_summaries, consolidated_quantity).
+    """
+    if not summaries:
+        return summaries or [], quantity
+
+    # 1. Group summaries by normalized product name
+    product_order: list[str] = []
+    product_summaries: dict[str, list[str]] = {}
+    product_qtys: dict[str, list[str]] = {}
+
+    for s in summaries:
+        prod = s.get("product", "")
+        # Normalize product name to short keyword form
+        for kw in _PRODUCT_KEYWORDS:
+            if kw in prod:
+                prod = kw
+                break
+        if not prod:
+            prod = "产品"
+
+        if prod not in product_order:
+            product_order.append(prod)
+
+        if s.get("summary"):
+            product_summaries.setdefault(prod, []).append(s["summary"])
+
+    # 2. Re-aggregate quantity if it contains duplicate products
+    if quantity and "、" in quantity:
+        for part in quantity.split("、"):
+            part = part.strip()
+            if not part:
+                continue
+            # Find the product keyword in this part
+            prod = ""
+            for kw in _PRODUCT_KEYWORDS:
+                if kw in part:
+                    prod = kw
+                    break
+            if not prod:
+                continue
+            # Extract quantity portion (everything before the product name)
+            qty_part = part.replace(prod, "").strip()
+            if qty_part:
+                product_qtys.setdefault(prod, []).append(qty_part)
+
+    # 3. Build consolidated summaries
+    consolidated: list[dict] = []
+    products_with_quantity: list[str] = []
+
+    for prod in product_order:
+        sum_list = product_summaries.get(prod, [])
+        qtys = product_qtys.get(prod, [])
+
+        if sum_list:
+            unique = _deduplicate_summaries(sum_list)
+            merged_text = _format_summary("\n\n".join(unique))
+            consolidated.append({"product": prod, "summary": merged_text})
+
+            # Only aggregate quantities for genuinely different entries;
+            # duplicate summaries → duplicate quantities of same devices
+            if qtys:
+                if len(unique) == 1 or len(unique) < len(sum_list):
+                    merged_qty = qtys[0]  # duplicates → single quantity
+                else:
+                    merged_qty = _merge_quantities(qtys)
+                products_with_quantity.append(f"{merged_qty}{prod}")
+        else:
+            consolidated.append({"product": prod, "summary": ""})
+            if qtys:
+                merged_qty = _merge_quantities(qtys)
+                products_with_quantity.append(f"{merged_qty}{prod}")
+
+    new_quantity = "、".join(products_with_quantity) if products_with_quantity else quantity
+
+    return consolidated, new_quantity
 
 
 async def run_email_pre_analysis(db: Session) -> dict:
@@ -243,11 +515,15 @@ async def _analyze_single_record(
         db.commit()
         return {"success": False, "error": "no attachment"}
 
-    # Download ALL PDFs and extract text from each
+    # Download PDFs and extract text — only analyze PDFs that look like inspection reports
     import httpx
     import fitz  # PyMuPDF
 
-    ai_infos = []
+    _INSPECTION_REPORT_KEYWORDS = ["巡检报告", "巡检", "Inspection", "inspection"]
+
+    # First pass: download all PDFs and classify them
+    # (non-PDF files like Word docs are skipped for AI analysis but will be sent as email attachments)
+    pdf_texts: list[tuple[str, str, bool]] = []  # (filename, text, is_inspection_report)
     download_errors = []
     for att in report_attachments:
         if not isinstance(att, dict):
@@ -256,6 +532,16 @@ async def _analyze_single_record(
         filename = att.get("filename", "report.pdf")
         if not url:
             continue
+
+        # Skip non-PDF files for AI analysis.
+        # Word docs (.doc/.docx) are NOT sent to customers (PDF report is sufficient).
+        # Other non-PDF files (contracts, authorization letters, etc.) ARE sent as email attachments.
+        if not filename.lower().endswith(".pdf"):
+            logger.info("Skipping non-PDF attachment for AI analysis: %s", filename)
+            continue
+
+        is_inspection_report = any(kw in filename for kw in _INSPECTION_REPORT_KEYWORDS)
+
         try:
             async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
                 resp = await client.get(url)
@@ -266,19 +552,52 @@ async def _analyze_single_record(
                     pdf_text += page.get_text()
                 doc.close()
 
-                if pdf_text.strip():
-                    info, ai_error = extract_info_with_ai(pdf_text)
-                    if info:
-                        info["_filename"] = filename
-                        ai_infos.append(info)
-                    if ai_error:
-                        download_errors.append(f"{filename}: {ai_error}")
-                else:
+                if not pdf_text.strip():
                     download_errors.append(f"{filename}: PDF 文本为空")
+                    continue
+
+                pdf_texts.append((filename, pdf_text, is_inspection_report))
         except Exception as e:
             logger.warning("Failed to download attachment for analysis %s: %s", record_id, e)
             download_errors.append(f"{filename}: {e}")
             continue
+
+    # Second pass: decide which PDFs to run AI on
+    # Strategy: prefer PDFs whose filename matches inspection report keywords;
+    # if none match, fall back to analyzing ALL PDFs (degradation to avoid false negatives)
+    inspection_pdfs = [(fn, txt) for fn, txt, is_ir in pdf_texts if is_ir]
+    other_pdfs = [(fn, txt) for fn, txt, is_ir in pdf_texts if not is_ir]
+
+    if inspection_pdfs:
+        ai_candidates = inspection_pdfs
+        for fn, _ in other_pdfs:
+            logger.info("Skipping non-inspection PDF for AI analysis: %s (inspection PDFs found)", fn)
+    elif other_pdfs:
+        # No PDF matched inspection keywords — fall back to analyzing all PDFs
+        ai_candidates = other_pdfs
+        logger.info(
+            "No PDF filename matched inspection keywords, falling back to analyzing all %d PDF(s)",
+            len(other_pdfs),
+        )
+    else:
+        ai_candidates = []
+
+    if not ai_candidates:
+        analysis.analysis_status = "failed"
+        analysis.error_message = "未找到巡检报告PDF（文件名需包含'巡检报告'或'巡检'）" + (f" ({'; '.join(download_errors)})" if download_errors else "")
+        analysis.analyzed_at = datetime.now(timezone.utc)
+        db.commit()
+        return {"success": False, "error": "no inspection report PDF"}
+
+    # Run AI extraction on selected PDFs
+    ai_infos = []
+    for filename, pdf_text in ai_candidates:
+        info, ai_error = extract_info_with_ai(pdf_text)
+        if info:
+            info["_filename"] = filename
+            ai_infos.append(info)
+        if ai_error:
+            download_errors.append(f"{filename}: {ai_error}")
 
     if not ai_infos:
         analysis.analysis_status = "failed"
@@ -296,7 +615,22 @@ async def _analyze_single_record(
     analysis.product_name = merged.get("product_name") or analysis.product_name
     analysis.inspection_date = ai_infos[0].get("inspection_date") if ai_infos else None
     analysis.quantity = merged.get("quantity") or analysis.quantity
-    analysis.emails = ", ".join(merged.get("emails", [])) if merged.get("emails") else analysis.emails
+    ai_emails = merged.get("emails", [])
+    if ai_emails:
+        analysis.emails = ", ".join(ai_emails)
+    elif not analysis.emails:
+        # AI didn't find emails in PDF, fallback to AITable "报告发送邮箱" field
+        from services.monitor_service import get_email_pending
+        try:
+            email_result = await get_email_pending(db)
+            for item in email_result.get("pending", []):
+                if item.get("record_id") == record_id:
+                    ait_emails = item.get("email_addresses", [])
+                    if ait_emails:
+                        analysis.emails = ", ".join(ait_emails)
+                    break
+        except Exception:
+            pass
     analysis.summary = merged.get("summary") or analysis.summary
     analysis.summaries = merged.get("summaries")
     analysis.ai_info = ai_infos if len(ai_infos) > 1 else (ai_infos[0] if ai_infos else None)
@@ -354,16 +688,19 @@ async def refresh_aitable_fields_for_send(
     # Parse email list
     email_list = []
     if report_email:
-        for addr in report_email.replace("、", ",").replace("；", ",").split(","):
+        for addr in report_email.replace("\n", ",").replace("\r", "").replace("、", ",").replace("；", ",").replace("，", ",").split(","):
             addr = addr.strip()
             if addr and "@" in addr:
                 email_list.append(addr)
+
+    from services.aitable_fields import extract_select_name
 
     refreshed_fields = {
         "report_emails": email_list,
         "sales_name": sales_name,
         "customer_name": customer_name,
         "product_name": product_name,
+        "email_sent_status": extract_select_name(cells.get(DISPATCH["邮件是否发送"])) or "",
     }
 
     # Persist refreshed fields
@@ -406,6 +743,11 @@ async def send_email_from_pre_analysis(
     if "error" in refreshed:
         return {"status": "error", "message": f"刷新 AITable 字段失败: {refreshed['error']}"}
 
+    # Check if marked as "未上传" — do not send
+    email_sent_status = refreshed.get("email_sent_status", "")
+    if email_sent_status == "未上传":
+        return {"status": "error", "message": "巡检报告标记为\"未上传\"，不允许发送邮件"}
+
     settings = get_settings()
 
     # 2. Build recipient list: prefer extra_emails > refreshed > pre-analyzed
@@ -415,7 +757,7 @@ async def send_email_from_pre_analysis(
     elif refreshed.get("report_emails"):
         email_list = refreshed["report_emails"]
     elif analysis.emails:
-        email_list = [e.strip() for e in analysis.emails.split(",") if e.strip() and "@" in e]
+        email_list = [e.replace("\n", "").replace("\r", "").strip() for e in analysis.emails.replace("、", ",").replace("；", ",").replace("，", ",").split(",") if e.strip() and "@" in e]
 
     if not email_list:
         return {"status": "error", "message": "客户邮箱为空，请先填写收件人邮箱"}
@@ -449,6 +791,7 @@ async def send_email_from_pre_analysis(
 
     attachments = []
     download_errors = []
+    _WORD_EXTENSIONS = (".doc", ".docx")
     for att in report_attachments:
         if not isinstance(att, dict):
             continue
@@ -456,6 +799,10 @@ async def send_email_from_pre_analysis(
         url = att.get("url", "")
         if not url:
             download_errors.append(f"{filename}: 无下载链接")
+            continue
+        # Skip Word docs (.doc/.docx) — PDF report is sufficient for customers
+        if filename.lower().endswith(_WORD_EXTENSIONS):
+            logger.info("Skipping Word doc for email attachment: %s", filename)
             continue
         try:
             async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
@@ -474,8 +821,10 @@ async def send_email_from_pre_analysis(
     inspection_date = analysis.inspection_date or ""
     quantity = analysis.quantity or ""
 
+    # Consolidate summaries: merge duplicate products, dedup, re-aggregate quantity
+    summaries, quantity = _consolidate_email_data(analysis.summaries, quantity)
+
     # Build summary: multi-product → segmented by product; single → direct
-    summaries = analysis.summaries
     if summaries and len(summaries) > 1:
         summary = "\n\n".join(
             f"【{s['product']}】\n{s['summary']}" for s in summaries if s.get("summary")
@@ -485,30 +834,47 @@ async def send_email_from_pre_analysis(
     else:
         summary = analysis.summary or ""
 
-    subject = f"【长亭科技巡检报告】- {customer_name}-{product_name}-{inspection_date}"
+    short_product = _short_product_name(product_name)
+    date_display = (inspection_date or "近日").replace("-", ".")
+    subject = f"【长亭科技巡检报告】{customer_name}{short_product}巡检报告-{date_display}"
 
-    body = f"""尊敬的客户，您好，
+    # Build quantity display: "2台雷池" / "雷池" (no quantity)
+    # If quantity already contains product names (e.g. "1台洞鉴、2个探针谛听"), use it directly
+    if quantity:
+        if any(kw in quantity for kw in _PRODUCT_KEYWORDS):
+            qty_display = quantity
+        else:
+            qty_display = f"{quantity}{short_product or product_name}"
+    elif product_name:
+        qty_display = short_product or product_name
+    else:
+        qty_display = "相关设备"
 
-非常感谢对长亭科技的信任！本司于 {inspection_date or '{时间}'} 对贵司的 {quantity or '{数量}'} 进行了一次全面的巡检，结果如下：
-
-{summary or '{巡检总结}'}
-
-详细巡检报告见附件，请查收！
-
-后续如有问题欢迎通过【长亭科技售后服务中心】微信服务号-【人工服务】联系我们～"""
+    body = (
+        f"尊敬的客户，您好，\n"
+        f"\n"
+        f"非常感谢对长亭科技的信任！本司于 {inspection_date or '近日'} 对贵司的 {qty_display} 进行了一次全面的巡检，结果如下：\n"
+        f"\n"
+        f"{summary or '详见附件巡检报告。'}\n"
+        f"\n"
+        f"详细巡检报告见附件，请查收！\n"
+        f"\n"
+        f"后续如有问题欢迎通过【长亭科技售后服务中心】微信服务号-【人工服务】联系我们～"
+    )
 
     # 5. Send email
     from services.email_sender import send_email as _send_email
 
-    # Build CC: sales name → email conversion
-    cc_emails = ""
+    # Build CC: default CC + sales email
+    default_cc = ["jia.chen@chaitin.com", "kai.wu@chaitin.com", "lei.shu@chaitin.com"]
+    cc_list = list(default_cc)
     sales_name = refreshed.get("sales_name", "")
     if sales_name:
         try:
             from services.email_sender import _get_name_pinyin
             sales_email = _get_name_pinyin(sales_name)
-            if sales_email:
-                cc_emails = sales_email
+            if sales_email and sales_email not in cc_list:
+                cc_list.append(sales_email)
         except Exception:
             pass
 
@@ -517,7 +883,7 @@ async def send_email_from_pre_analysis(
         subject=subject,
         body=body,
         attachments=attachments if attachments else None,
-        cc_emails=cc_emails,
+        cc_emails=",".join(cc_list),
     )
 
     if not success:
@@ -553,9 +919,15 @@ async def send_email_from_pre_analysis(
         if wo:
             wo.email_trigger_status = "已发送"
             wo.email_sent = "是"
-            db.commit()
     except Exception as e:
         logger.warning("Failed to update WorkOrder email status: %s", e)
+
+    # Mark pre-analysis as email sent
+    try:
+        analysis.email_sent = True
+        db.commit()
+    except Exception as e:
+        logger.warning("Failed to mark EmailPreAnalysis email_sent: %s", e)
 
     result = {"status": "success", "message": message}
     if closure_result:
@@ -590,6 +962,7 @@ def get_pre_analysis_for_records(db: Session, record_ids: list[str]) -> dict[str
             "summary": a.summary,
             "summaries": a.summaries,
             "error_message": a.error_message,
+            "email_sent": a.email_sent,
             "analyzed_at": a.analyzed_at.isoformat() if a.analyzed_at else None,
         }
 
@@ -632,7 +1005,7 @@ async def preview_email_content(
     elif refreshed.get("report_emails"):
         email_list = refreshed["report_emails"]
     elif analysis.emails:
-        email_list = [e.strip() for e in analysis.emails.split(",") if e.strip() and "@" in e]
+        email_list = [e.replace("\n", "").replace("\r", "").strip() for e in analysis.emails.replace("、", ",").replace("；", ",").replace("，", ",").split(",") if e.strip() and "@" in e]
 
     # Build CC list
     default_cc = ["jia.chen@chaitin.com", "kai.wu@chaitin.com", "lei.shu@chaitin.com"]
@@ -653,7 +1026,9 @@ async def preview_email_content(
     inspection_date = analysis.inspection_date or ""
     quantity = analysis.quantity or ""
 
-    summaries = analysis.summaries
+    # Consolidate summaries: merge duplicate products, dedup, re-aggregate quantity
+    summaries, quantity = _consolidate_email_data(analysis.summaries, quantity)
+
     if summaries and len(summaries) > 1:
         summary = "\n\n".join(
             f"【{s['product']}】\n{s['summary']}" for s in summaries if s.get("summary")
@@ -710,7 +1085,11 @@ async def preview_email_content(
                 if isinstance(report_attachments, list):
                     for att in report_attachments:
                         if isinstance(att, dict):
-                            attachment_filenames.append(att.get("filename", "report.pdf"))
+                            fn = att.get("filename", "report.pdf")
+                            # Skip Word docs in preview (same filter as send)
+                            if fn.lower().endswith((".doc", ".docx")):
+                                continue
+                            attachment_filenames.append(fn)
                 break
     except Exception as e:
         logger.warning("Failed to fetch attachment filenames for preview: %s", e)
