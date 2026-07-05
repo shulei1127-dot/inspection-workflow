@@ -96,3 +96,100 @@ async def trigger_closure_check(db: Session = Depends(get_db)):
 async def trigger_sync_closure_status(db: Session = Depends(get_db)):
     """Sync closure status from PTS for all locally unclosed work orders."""
     return await sync_closure_status_from_pts(db)
+
+
+@router.post("/api/monitor/upload-report/{record_id}")
+async def upload_report_to_pts(record_id: str):
+    """Manually upload inspection reports from AITable to PTS for a specific record.
+
+    Downloads report attachments from AITable, uploads them to PTS via internal API,
+    and attaches the file IDs to the work order info note.
+
+    Does NOT advance the work order stage or change closure status.
+    """
+    from core.config import get_settings
+    from services.aitable_fields import DISPATCH, extract_text
+    from services import dingtalk_client, pts_client
+    from services.pts_closure_service import _extract_pts_order_id
+
+    settings = get_settings()
+    if not settings.dt_dispatch_base_id or not settings.dt_dispatch_table_id:
+        return {"success": False, "message": "AITable 未配置"}
+
+    # 1. Fetch AITable record
+    records = await dingtalk_client.query_records(
+        limit=100,
+        base_id=settings.dt_dispatch_base_id,
+        table_id=settings.dt_dispatch_table_id,
+        fetch_all=True,
+    )
+
+    target_record = None
+    for record in records:
+        rid = record.get("recordId") or record.get("record_id", "")
+        if rid == record_id:
+            target_record = record
+            break
+
+    if not target_record:
+        return {"success": False, "message": f"AITable 记录 {record_id} 未找到"}
+
+    cells = target_record.get("cells", {})
+    customer_name = extract_text(cells.get(DISPATCH["客户名称"])) or ""
+    report_attachments = cells.get(DISPATCH["巡检报告"])
+
+    if not isinstance(report_attachments, list) or len(report_attachments) == 0:
+        return {"success": False, "message": "巡检报告为空，无法上传"}
+
+    # 2. Extract PTS order ID from link field
+    link_val = cells.get(DISPATCH["巡检工单链接"])
+    pts_order_id = _extract_pts_order_id(link_val)
+
+    if not pts_order_id:
+        return {"success": False, "message": "未找到 PTS 工单链接，无法上传"}
+
+    # 3. Download and upload reports
+    file_ids = await pts_client.download_and_upload_reports(report_attachments)
+
+    if not file_ids:
+        return {
+            "success": False,
+            "message": "所有报告上传失败",
+            "pts_order_id": pts_order_id,
+            "customer_name": customer_name,
+        }
+
+    # 4. Add note with file IDs to PTS work order
+    attachment_names = []
+    for att in report_attachments:
+        if isinstance(att, dict):
+            name = att.get("filename", "")
+            if name:
+                attachment_names.append(name)
+
+    note_text = f"巡检报告已上传（{len(file_ids)}个附件）"
+    if attachment_names:
+        note_text += f"，附件: {', '.join(attachment_names)}"
+
+    try:
+        result = await pts_client.add_work_order_info(
+            work_order_id=pts_order_id,
+            note=note_text,
+            file_ids=file_ids,
+        )
+        return {
+            "success": True,
+            "message": f"上传成功: {len(file_ids)}个文件已关联到工单 {pts_order_id}",
+            "pts_order_id": pts_order_id,
+            "customer_name": customer_name,
+            "file_ids": file_ids,
+            "note_added": result,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"文件已上传但备注添加失败: {e}",
+            "pts_order_id": pts_order_id,
+            "customer_name": customer_name,
+            "file_ids": file_ids,
+        }

@@ -18,10 +18,7 @@
           <span class="nav-icon">📡</span>
           <span>监控触发</span>
         </router-link>
-        <router-link to="/sync" class="nav-item" active-class="active">
-          <span class="nav-icon">🔄</span>
-          <span>数据同步</span>
-        </router-link>
+        <!-- 数据同步页面已隐藏，相关功能在任务日志中可查 -->
         <router-link to="/email-tool" class="nav-item" active-class="active">
           <span class="nav-icon">📧</span>
           <span>邮件发送</span>

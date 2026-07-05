@@ -12,6 +12,7 @@ class WorkOrder(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     pts_order_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
     pts_order_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    crm_project_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     order_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
     customer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     product_name: Mapped[str | None] = mapped_column(String(255), nullable=True)

@@ -22,11 +22,7 @@ const router = createRouter({
       name: 'Monitor',
       component: () => import('../views/Monitor.vue'),
     },
-    {
-      path: '/sync',
-      name: 'Sync',
-      component: () => import('../views/Sync.vue'),
-    },
+    // /sync 路由已隐藏，数据同步日志在任务日志页面可查看
     {
       path: '/email-tool',
       name: 'EmailTool',

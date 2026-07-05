@@ -372,6 +372,7 @@ def _extract_fields(raw: dict) -> dict:
     contact_name = None
     contact_phone = None
     product_name = None
+    crm_project_id = None
     if isinstance(delivery, dict):
         after_sale = delivery.get("after_sale")
         if isinstance(after_sale, dict):
@@ -379,6 +380,10 @@ def _extract_fields(raw: dict) -> dict:
         assigner = delivery.get("assigner")
         if isinstance(assigner, dict):
             assigner_name = assigner.get("name")
+        # CRM project ID: delivery.project.id
+        project = delivery.get("project")
+        if isinstance(project, dict):
+            crm_project_id = project.get("id")
         # Contact info: delivery.contact_list[].contact
         contact_list = delivery.get("contact_list")
         if isinstance(contact_list, list) and len(contact_list) > 0:
@@ -447,6 +452,7 @@ def _extract_fields(raw: dict) -> dict:
         "contact_name": contact_name,
         "contact_phone": contact_phone,
         "sales_name": sales_name,
+        "crm_project_id": crm_project_id,
     }
 
 
@@ -562,6 +568,9 @@ def _work_order_to_cells(wo: WorkOrder) -> dict:
         cells[DISPATCH["所属区域"]] = wo.region
     if wo.sales_name:
         cells[DISPATCH["销售"]] = wo.sales_name
+    if wo.crm_project_id:
+        crm_url = f"https://crm.chaitin.net/project/{wo.crm_project_id}#base"
+        cells[DISPATCH["CRM项目链接"]] = {"link": crm_url, "text": crm_url}
 
     return cells
 

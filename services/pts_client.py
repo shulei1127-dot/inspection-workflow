@@ -14,6 +14,7 @@ Mutations for work order closure:
 import asyncio
 import logging
 import re
+import threading
 import time
 
 import httpx
@@ -27,17 +28,31 @@ _settings = get_settings()
 # Rate limiting
 _rate_limit_interval = 1.0 / _settings.pts_rate_limit  # seconds between requests
 _last_call_time: float = 0.0
-_rate_lock = asyncio.Lock()
+_rate_lock = threading.Lock()  # threading.Lock is safe across asyncio event loops
 
 
 async def _rate_limit() -> None:
+    """Enforce PTS API rate limit (4 req/s).
+
+    Uses threading.Lock instead of asyncio.Lock because APScheduler runs
+    sync jobs that call asyncio.run() in separate threads, creating new
+    event loops. asyncio.Lock is bound to the event loop where it was
+    created and raises RuntimeError when used from a different loop.
+    threading.Lock has no such limitation.
+    """
     global _last_call_time
-    async with _rate_lock:
+    with _rate_lock:
         now = time.monotonic()
         elapsed = now - _last_call_time
         if elapsed < _rate_limit_interval:
-            await asyncio.sleep(_rate_limit_interval - elapsed)
-        _last_call_time = time.monotonic()
+            wait_time = _rate_limit_interval - elapsed
+            _last_call_time = now + wait_time
+        else:
+            wait_time = 0
+            _last_call_time = now
+
+    if wait_time > 0:
+        await asyncio.sleep(wait_time)
 
 
 def _inline_variables(query: str, variables: dict | None = None) -> str:
@@ -320,24 +335,157 @@ async def update_work_order_plan_complete_date(work_order_id: str, plan_complete
         return False
 
 
-async def add_work_order_info(work_order_id: str, note: str = "") -> bool:
-    """Add note to a PTS work order.
+async def add_work_order_info(
+    work_order_id: str,
+    note: str = "",
+    file_ids: list[str] | None = None,
+) -> bool:
+    """Add note and/or file attachments to a PTS work order.
 
-    PTS add_work_order_info mutation returns Boolean.
-    For file attachments, use upload_file() first, then embed markdown links in the note.
+    Args:
+        work_order_id: PTS work order ID.
+        note: Text note to add (special chars auto-escaped).
+        file_ids: List of PTS file IDs (from upload_file_via_api) to attach.
+
+    Returns:
+        True on success, False on failure.
     """
+    escaped_note = note.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+    file_part = ""
+    if file_ids:
+        ids_str = ", ".join(f'"{fid}"' for fid in file_ids)
+        file_part = f", file: [{ids_str}]"
+
     mutation = """
     mutation {
-      add_work_order_info(id: "%s", note: "%s")
+      add_work_order_info(id: "%s", note: "%s"%s)
     }
-    """ % (work_order_id, note.replace('"', '\\"').replace('\n', '\\n'))
+    """ % (work_order_id, escaped_note, file_part)
 
     result = await pts_graphql_query(mutation)
     return result.get("add_work_order_info", False)
 
 
+async def upload_file_via_api(file_content: bytes, filename: str) -> str | None:
+    """Upload a file to PTS via internal API (Bearer token auth).
+
+    Uses the PTS /api/upload endpoint with cat=work_order.
+    This replaces the Playwright-based upload_file() method.
+
+    Args:
+        file_content: Raw file bytes.
+        filename: Original filename (e.g. "巡检报告.pdf").
+
+    Returns:
+        PTS file ID (e.g. "6a0ea81319ab1b9837973a00") on success, None on failure.
+    """
+    settings = get_settings()
+    upload_url = settings.pts_upload_url
+
+    if not upload_url:
+        logger.error("PTS upload URL not configured (pts_upload_url is empty)")
+        return None
+
+    try:
+        await _rate_limit()
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                upload_url,
+                headers={
+                    "Authorization": f"Bearer {settings.pts_api_token}",
+                },
+                files={"file": (filename, file_content)},
+                data={"cat": "work_order"},
+            )
+
+        if resp.status_code == 401:
+            logger.error("PTS upload failed: 401 Unauthorized (token invalid or expired)")
+            return None
+        if resp.status_code == 429:
+            logger.warning("PTS upload rate limited (429)")
+            return None
+        if resp.status_code != 200:
+            logger.error("PTS upload failed: HTTP %d: %s", resp.status_code, resp.text[:200])
+            return None
+
+        data = resp.json()
+        if data.get("err") != 0:
+            logger.error("PTS upload error: err=%s, msg=%s", data.get("err"), data.get("msg"))
+            return None
+
+        file_id = data.get("id")
+        logger.info("Uploaded %s to PTS via API: id=%s, filename=%s", filename, file_id, data.get("filename"))
+        return file_id
+
+    except Exception as e:
+        logger.error("PTS file upload via API exception: %s", e)
+        return None
+
+
+async def download_and_upload_reports(
+    report_attachments: list[dict],
+) -> list[str]:
+    """Download attachments from AITable and upload each to PTS.
+
+    For each attachment in the list:
+    1. Extract download URL (check both "url" and "downloadUrl" fields)
+    2. Download the file content
+    3. Upload to PTS via internal API
+    4. Collect the PTS file IDs
+
+    Args:
+        report_attachments: AITable attachment list, each item is a dict with
+            "filename", "url" or "downloadUrl", and optional "fileSize".
+
+    Returns:
+        List of PTS file IDs for successfully uploaded files.
+        May be shorter than input list if some attachments fail.
+    """
+    file_ids: list[str] = []
+
+    for att in report_attachments:
+        if not isinstance(att, dict):
+            continue
+
+        filename = att.get("filename", "report.pdf")
+        # AITable may return "url" or "downloadUrl" depending on the field type
+        url = att.get("url") or att.get("downloadUrl", "")
+        if not url:
+            logger.warning("Attachment %s has no download URL, skipping", filename)
+            continue
+
+        try:
+            # Download from AITable OSS
+            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                file_content = resp.content
+
+            logger.info("Downloaded attachment: %s (%d bytes)", filename, len(file_content))
+
+            # Upload to PTS
+            pts_file_id = await upload_file_via_api(file_content, filename)
+            if pts_file_id:
+                file_ids.append(pts_file_id)
+                logger.info("Uploaded %s to PTS: file_id=%s", filename, pts_file_id)
+            else:
+                logger.warning("Failed to upload %s to PTS, skipping", filename)
+
+        except Exception as e:
+            logger.error("Failed to download/upload attachment %s: %s", filename, e)
+            continue
+
+    return file_ids
+
+
 async def upload_file(file_path: str, filename: str | None = None) -> str | None:
     """Upload a file to PTS file storage via browser automation.
+
+    DEPRECATED: Use upload_file_via_api() instead, which uses the internal
+    PTS API endpoint with Bearer token and does not require Playwright or
+    session cookies. This method is kept for backward compatibility only.
 
     PTS's /api/upload endpoint requires the web session cookie, which cannot
     be used from Python httpx directly (PTS reverse proxy rejects it).

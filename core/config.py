@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,7 +16,8 @@ class Settings(BaseSettings):
     pts_graphql_url: str = "http://api.in.chaitin.net/pts/query"
     pts_api_token: str = ""
     pts_rate_limit: float = 4.0  # max requests per second
-    pts_session_cookie: str = ""  # PTS 网页端 session cookie (c=xxx)，用于文件上传
+    pts_session_cookie: str = ""  # PTS 网页端 session cookie (c=xxx)，用于 Playwright 文件上传（已废弃）
+    pts_upload_url: str = ""  # PTS 内网文件上传端点，从 pts_graphql_url 自动推导，无需手动配置
 
     # DingTalk AITable - 日常增值服务进展 (sync + monitor)
     dt_aitable_base_id: str = ""
@@ -98,6 +100,22 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @model_validator(mode="after")
+    def _derive_pts_upload_url(self) -> "Settings":
+        """从 pts_graphql_url 自动推导 PTS 文件上传端点。
+
+        生产环境 PTS_GRAPHQL_URL=http://10.9.255.197/pts/query
+        推导为 http://10.9.255.197/pts/api/upload
+        如果 .env 中显式配置了 PTS_UPLOAD_URL 则使用配置值。
+        """
+        if not self.pts_upload_url and self.pts_graphql_url:
+            base = self.pts_graphql_url.rstrip("/")
+            if base.endswith("/query"):
+                self.pts_upload_url = base[:-6] + "/api/upload"
+            else:
+                self.pts_upload_url = base.replace("/query", "/api/upload")
+        return self
 
 
 @lru_cache(maxsize=1)

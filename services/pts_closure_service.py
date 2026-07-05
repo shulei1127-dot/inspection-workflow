@@ -295,9 +295,6 @@ async def run_closure_check(db: Session) -> dict:
     logger.info("Closure check completed: %s", result)
     return result
 
-    logger.info("Closure check completed: %s", result)
-    return result
-
 
 async def _close_single_work_order(
     db: Session,
@@ -307,17 +304,18 @@ async def _close_single_work_order(
     """Close a single work order in PTS.
 
     Steps:
-    1. Assign work order to 舒磊 (default assignee)
-    2. Add note to PTS work order (referencing inspection report)
-    3. Advance stage via confirm_work_order_stage until reaching 审核工单
-    4. Log the trigger action
+    1. Assign work order to default assignee (舒磊)
+    2. Download inspection reports from AITable and upload to PTS
+    3. Add note to PTS work order (with file IDs if upload succeeded)
+    4. Advance stage via confirm_work_order_stage until reaching 审核工单
+    5. Log the trigger action
 
     Returns:
         "success" - 成功闭环
         "failed" - 失败
         "manual" - 需要人工处理（权限错误等）
     """
-    # 1. Assign work order to 舒磊
+    # 1. Assign work order to default assignee
     try:
         mutation = """
         mutation {
@@ -329,12 +327,27 @@ async def _close_single_work_order(
         """ % (wo.pts_order_id, _DEFAULT_ASSIGNEE_ID)
         result = await pts_client.pts_graphql_query(mutation)
         assign_result = result.get("update_work_order_claim_by", False)
-        logger.info("Assigned work order %s to 舒磊: success=%s", wo.pts_order_id, assign_result)
+        logger.info("Assigned work order %s to default assignee: success=%s", wo.pts_order_id, assign_result)
     except Exception as e:
         logger.warning("Failed to assign work order %s: %s", wo.pts_order_id, e)
         # Continue even if assignment fails
 
-    # 2. Add note to PTS work order
+    # 2. Download inspection reports from AITable and upload to PTS
+    pts_file_ids: list[str] = []
+    if isinstance(report_attachments, list) and len(report_attachments) > 0:
+        try:
+            pts_file_ids = await pts_client.download_and_upload_reports(report_attachments)
+            if pts_file_ids:
+                logger.info(
+                    "Uploaded %d report(s) to PTS for work order %s: %s",
+                    len(pts_file_ids), wo.pts_order_id, pts_file_ids,
+                )
+            else:
+                logger.warning("No reports successfully uploaded for work order %s", wo.pts_order_id)
+        except Exception as e:
+            logger.error("Report upload failed for work order %s: %s", wo.pts_order_id, e)
+
+    # 3. Add note to PTS work order (with file IDs if available)
     attachment_names = []
     for att in report_attachments:
         if isinstance(att, dict):
@@ -342,7 +355,10 @@ async def _close_single_work_order(
             if name:
                 attachment_names.append(name)
 
-    note_text = "巡检报告已上传至钉钉文档"
+    if pts_file_ids:
+        note_text = f"巡检报告已上传（{len(pts_file_ids)}个附件）"
+    else:
+        note_text = "巡检报告已上传至钉钉文档"
     if attachment_names:
         note_text += f"，附件: {', '.join(attachment_names)}"
 
@@ -350,12 +366,13 @@ async def _close_single_work_order(
         result = await pts_client.add_work_order_info(
             work_order_id=wo.pts_order_id,
             note=note_text,
+            file_ids=pts_file_ids if pts_file_ids else None,
         )
-        logger.info("Added note to PTS work order %s: success=%s", wo.pts_order_id, result)
+        logger.info("Added note to PTS work order %s: success=%s (file_ids=%s)", wo.pts_order_id, result, pts_file_ids)
     except Exception as e:
         logger.error("Failed to add note to PTS work order %s: %s", wo.pts_order_id, e)
 
-    # 2. Advance stage until reaching "审核工单"
+    # 4. Advance stage until reaching "审核工单"
     success_count = 0
     target_reached = False
     needs_manual = False  # 是否需要人工处理
@@ -439,7 +456,7 @@ async def _close_single_work_order(
         )
         return "failed"
 
-    _log_trigger(db, wo, "closure_success", f"巡检报告备注已添加，工单阶段推进到审核工单（推进{success_count}次）")
+    _log_trigger(db, wo, "closure_success", f"巡检报告已上传（{len(pts_file_ids)}个文件），工单阶段推进到审核工单（推进{success_count}次）")
     return "success"
 
 

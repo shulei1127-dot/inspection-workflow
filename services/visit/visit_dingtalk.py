@@ -41,8 +41,9 @@ async def update_visit_link_to_dingtalk(
     if not settings.visit_writeback_enabled:
         return {"action": "disabled", "reason": "visit_writeback_enabled is False"}
 
-    base_id = settings.visit_writeback_aitable_base_id
-    table_id = settings.visit_writeback_aitable_table_id
+    # 与读取路径保持一致：优先 visit_writeback 配置，回退到 review AITable
+    base_id = settings.visit_writeback_aitable_base_id or settings.review_aitable_base_id
+    table_id = settings.visit_writeback_aitable_table_id or settings.review_aitable_main_table_id
     link_field_id = settings.visit_writeback_link_field_id
 
     if not base_id or not table_id or not link_field_id:
