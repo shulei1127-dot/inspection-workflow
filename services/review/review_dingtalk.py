@@ -122,9 +122,11 @@ REVIEW_REGION_TABLE_MAP: dict[str, str] = {
     "华北东北战区": "sdBTYUI",
     "华南战区": "ycBxHBu",
     "西南西北战区": "TlYOyHp",
+    "华中战区": "eDWgaIR",
 }
 
 REVIEW_REGION_INDUSTRY_TABLE_ID = "RPBc9Rn"
+REVIEW_REGION_INDUSTRY_PERSON_IN_CHARGE_FIELD = "Z6FY4Z4"
 REVIEW_REGION_INDUSTRY_NAMES: set[str] = {
     "政企行业", "通信头部战队", "金融头部战队",
     "能源央企头部战队", "商业策略组", "战略伙伴战队", "政府头部战队",
@@ -132,12 +134,13 @@ REVIEW_REGION_INDUSTRY_NAMES: set[str] = {
 
 REGION_AUDIT_REJECT_OPTION_ID = "1MO1Mgbfqu"
 
-# 区域表"交付负责人"用户字段 ID（各子表字段 ID 不同，缺失的表示该表无此字段）
-REGION_PERSON_IN_CHARGE_FIELD_MAP: dict[str, str | None] = {
+# 区域表"交付负责人"用户字段 ID（各子表字段 ID 不同）
+REGION_PERSON_IN_CHARGE_FIELD_MAP: dict[str, str] = {
     "华东战区": "Yf3d8nL",
     "华北东北战区": "kbrn7Jk",
-    "华南战区": None,
+    "华南战区": "Yj0evMZ",
     "西南西北战区": "d8MZnDh",
+    "华中战区": "Z6FY4Z4",
 }
 
 # 主表"交付负责人"用户字段 ID
@@ -289,18 +292,28 @@ async def _update_user_fields(
         person_in_charge_field: "交付负责人"字段ID。主表为 qWDHbYc，
             区域子表各不相同（查 REGION_PERSON_IN_CHARGE_FIELD_MAP）。
             为 None 表示目标表无此字段，跳过写入。
+
+    业务规则：如果交付分配人和交付负责人是同一人，只填写交付分配人。
     """
     if not record_id:
         return
     user_cells: dict[str, Any] = {}
+
+    assigner_uid: str | None = None
     if result.assigner_name:
-        uid = await _resolve_dingtalk_user_id(result.assigner_name)
-        if uid:
-            user_cells[ASSIGNER_USER_FIELD] = [{"corpId": corp_id, "userId": uid}]
+        assigner_uid = await _resolve_dingtalk_user_id(result.assigner_name)
+        if assigner_uid:
+            user_cells[ASSIGNER_USER_FIELD] = [{"corpId": corp_id, "userId": assigner_uid}]
+
     if result.person_in_charge_name and person_in_charge_field:
-        uid = await _resolve_dingtalk_user_id(result.person_in_charge_name)
-        if uid:
-            user_cells[person_in_charge_field] = [{"corpId": corp_id, "userId": uid}]
+        # 交付分配人和交付负责人是同一人时，只填写交付分配人
+        if result.person_in_charge_name == result.assigner_name:
+            pass  # 已通过 ASSIGNER_USER_FIELD 写入，跳过
+        else:
+            pic_uid = await _resolve_dingtalk_user_id(result.person_in_charge_name)
+            if pic_uid:
+                user_cells[person_in_charge_field] = [{"corpId": corp_id, "userId": pic_uid}]
+
     if user_cells:
         try:
             await update_records(
@@ -365,8 +378,14 @@ async def _write_to_region_sheet(
 
         record_id: str | None = (resp.get("newRecordIds") or [None])[0]
 
-        # 单独更新用户字段
-        pic_field = REGION_PERSON_IN_CHARGE_FIELD_MAP.get(result.region) if result.region else None
+        # 查找该区域/行业的交付负责人字段ID
+        pic_field: str | None = None
+        if result.region:
+            if result.region in REVIEW_REGION_INDUSTRY_NAMES:
+                pic_field = REVIEW_REGION_INDUSTRY_PERSON_IN_CHARGE_FIELD
+            else:
+                pic_field = REGION_PERSON_IN_CHARGE_FIELD_MAP.get(result.region)
+
         if record_id:
             await _update_user_fields(
                 record_id, result,
