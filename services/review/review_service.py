@@ -158,6 +158,9 @@ async def audit_single_project(project_id: str) -> dict[str, Any]:
             logger.warning("获取产品详情失败: product_id=%s, error=%s", product.product_id, exc)
 
     # 续保标记：根据 delivery_items 的 product_category 中的 "-续保" 后缀检测
+    # 只对无真实设备信息的产品实例做续保匹配，
+    # 有真实设备信息（序列号/机器码/型号任一有值）的产品是实际设备，即使续保交付项引用了它们也不应标记为续保记录。
+    # 这修复了纯续保项目中所有产品实例被错误标记为续保、导致规则6判定"缺产品实例"的问题。
     renewal_prefixes: set[str] = set()
     for di in project_data.delivery_items:
         parts = (di.product_category or "").rsplit("-", 1)
@@ -165,6 +168,9 @@ async def audit_single_project(project_id: str) -> dict[str, Any]:
             renewal_prefixes.add(parts[0])
     for detail in product_details:
         if detail.is_renewal_record:
+            continue
+        # 有真实设备信息的产品是实际设备，跳过续保标记
+        if _has_real_device_info(detail):
             continue
         parts = (detail.product_category or "").rsplit("-", 1)
         if len(parts) == 2 and parts[0] in renewal_prefixes:
@@ -313,3 +319,26 @@ async def list_review_logs(
     )
 
     return items, total
+
+
+# ── 续保标记辅助函数 ────────────────────────────────────────
+
+_PLACEHOLDER_VALUES = {"1", "2", "NA", "N/A", "无", "---", "", "undefined", "null"}
+
+
+def _has_real_device_info(detail) -> bool:
+    """判断产品是否有真实设备信息（序列号/机器码/型号任一有实际值）
+
+    续保项目的产品实例虽然 delivery_item 的 form 是"续保"，
+    但产品详情的 after_info 中有真实的序列号、机器码、型号等信息，
+    说明这是实际存在的设备，不应被标记为续保记录。
+    """
+    from services.review.audit.schemas import ProductInfo
+
+    if not isinstance(detail, ProductInfo):
+        return False
+
+    for value in (detail.serial_number, detail.machine_code, detail.model):
+        if value and value.strip() not in _PLACEHOLDER_VALUES:
+            return True
+    return False

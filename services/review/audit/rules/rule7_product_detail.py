@@ -91,7 +91,9 @@ def _check_hw_sw_info(product: ProductInfo) -> list[str]:
         if _is_empty(product.serial_number):
             issues.append("无序列号")
         if _is_empty(product.machine_code) and not _has_combined_machine_code(product.serial_number):
-            issues.append("无机器码")
+            # 入侵检测防御系统无机器码填写项，豁免此检查
+            if not _is_idp_product(product):
+                issues.append("无机器码")
     if product.type == ProductType.software:
         if _is_empty(product.machine_code):
             issues.append("无机器码")
@@ -109,11 +111,19 @@ def _check_license(product: ProductInfo) -> list[str]:
     elif product.license_type not in VALID_LICENSE_TYPES:
         issues.append('License性质非"正式交付-永久"或"正式交付-非永久"')
 
-    if _is_empty(product.license_expiry):
+    is_permanent = product.license_type in ("formal_delivery_permanent", "正式交付-永久")
+    if _is_empty(product.license_expiry) and not is_permanent:
         issues.append("无License有效期")
-    if _is_empty(product.license_id):
+    # 入侵检测防御系统无机器码无法申请License，License ID可以为空
+    if _is_empty(product.license_id) and not _is_idp_product(product):
         issues.append("无License ID")
     return issues
+
+
+def _is_idp_product(product: ProductInfo) -> bool:
+    """判断是否为入侵检测防御系统（Intrusion Detection & Prevention）"""
+    text = product.product_category or product.summary or ""
+    return "入侵检测防御" in text
 
 
 def _check_by_product(product: ProductInfo) -> list[str]:

@@ -57,14 +57,39 @@ def _is_date_in_range(date_str: str, range_start: date, range_end: date) -> bool
     return d is not None and range_start <= d <= range_end
 
 
-def _get_service_period_range(approval_date_str: str, total_months: int, deviation: int = 3) -> tuple[date, date, date]:
+def _is_renewal_item(product_category: str) -> bool:
+    """判断是否为续保交付项（form 名包含"续保"）"""
+    parts = product_category.split("-")
+    return "续保" in (parts[-1] if parts else "")
+
+
+def _get_service_period_range(approval_date_str: str, total_months: int, deviation: int = 3) -> tuple[date, date]:
     approval = _parse_date(approval_date_str)
     if approval is None:
         raise ValueError(f"Cannot parse approval date: {approval_date_str}")
     expected = _add_months(approval, total_months)
     range_start = _add_months(expected, -deviation)
     range_end = _add_months(expected, deviation)
-    return expected, range_start, range_end
+    return range_start, range_end
+
+
+def _get_service_period_range_from_activation(
+    after_sales_service_period: str, total_months: int, deviation: int = 3,
+) -> tuple[date, date]:
+    """续保项目：以 after_sales_service_period 反推的激活日期作为起算点
+
+    续保项目的售后服务期从实际交付激活日开始算，而非合同审批日。
+    激活日 = after_sales_service_period - total_months，然后以激活日为起算点
+    计算预期结束日和允许范围，避免交付周期导致误判。
+    """
+    end_date = _parse_date(after_sales_service_period)
+    if end_date is None:
+        raise ValueError(f"Cannot parse after_sales_service_period: {after_sales_service_period}")
+    activation = _add_months(end_date, -total_months)
+    expected = _add_months(activation, total_months)  # == end_date (approximately)
+    range_start = _add_months(expected, -deviation)
+    range_end = _add_months(expected, deviation)
+    return range_start, range_end
 
 
 def _check_saas(products: list[ProductInfo], delivery_items: list[DeliveryItem]) -> RuleResult:
@@ -100,6 +125,7 @@ def _check_hw_sw(delivery_items: list[DeliveryItem], products: list[ProductInfo]
 
     product_index = 0
     for item in delivery_items:
+        is_renewal = _is_renewal_item(item.product_category)
         is_sub = _is_subscription_item(item.product_category)
         for ci in item.config_items:
             parsed = parse_service_packages(ci.text)
@@ -127,7 +153,13 @@ def _check_hw_sw(delivery_items: list[DeliveryItem], products: list[ProductInfo]
                     details.append(f"{extract_short_product_name(product.product_category)}: 无售后有效服务期")
                     continue
 
-                expected, range_start, range_end = _get_service_period_range(approval_time, total_months)
+                # 续保项目：以 after_sales_service_period 反推的激活日期为起算点
+                # 避免因交付周期长导致审批日与激活日之间的偏差被误判
+                if is_renewal:
+                    range_start, range_end = _get_service_period_range_from_activation(period, total_months)
+                else:
+                    range_start, range_end = _get_service_period_range(approval_time, total_months)
+
                 if _is_date_in_range(period, range_start, range_end):
                     details.append(f"{extract_short_product_name(product.product_category)}: 服务期 {period} 在 [{_format_date(range_start)}, {_format_date(range_end)}] 范围内")
                 else:

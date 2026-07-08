@@ -586,6 +586,11 @@ async def query_work_order_status(pts_order_id: str) -> dict | None:
         id
         is_finished
         current_stage { name sequence }
+        creator { id name username }
+        delivery {
+          id
+          project { id name }
+        }
       }
     }
     """ % pts_order_id
@@ -607,3 +612,31 @@ async def confirm_work_order_stage(work_order_id: str) -> bool | None:
 
     result = await pts_graphql_query(mutation)
     return result.get("confirm_work_order_stage")
+
+
+async def add_work_order_member(work_order_id: str, user_id: str) -> bool:
+    """Add a user as a member to a PTS work order's delivery project.
+
+    This is needed when the work order was created by someone else and the
+    default assignee (舒磊) is not a project member. Without being a member,
+    the assign mutation will fail with "no permission" or "需要设置负责人".
+
+    Uses the update_work_order mutation with members field to add the user.
+
+    Returns True on success, False on failure.
+    """
+    mutation = """
+    mutation {
+      update_work_order(
+        id: "%s",
+        input: { members: ["%s"] }
+      )
+    }
+    """ % (work_order_id, user_id)
+
+    try:
+        result = await pts_graphql_query(mutation)
+        return result.get("update_work_order", False) is not False
+    except Exception as e:
+        logger.error("Failed to add member %s to work order %s: %s", user_id, work_order_id, e)
+        return False

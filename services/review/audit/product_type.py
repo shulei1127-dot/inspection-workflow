@@ -18,6 +18,8 @@ MAINSTREAM_PRODUCT_KEYWORDS = [
     "长亭第二代防火墙", "长亭漏洞管理", "长亭上网行为审计",
     "长亭数据库审计", "长亭安全认证网关", "入侵检测防御",
 ]
+# 产品形态名中含这些关键词的交付项是运营/服务类，不是产品设备，没有配置项和产品实例是正常的
+OPERATION_SERVICE_FORM_KEYWORDS = ["产品运营服务", "运营服务"]
 
 
 def identify_product_type(category: str, summary: str) -> ProductType:
@@ -58,3 +60,10 @@ def extract_short_product_name(product_category: str) -> str:
             return kw
     dash_idx = product_category.find("-")
     return product_category[:dash_idx] if dash_idx > 0 else product_category
+
+
+def is_operation_service_item(product_category: str) -> bool:
+    """判断交付项是否为运营服务类（如"洞鉴-产品运营服务"），这类交付项没有配置项和产品实例是正常的"""
+    parts = product_category.split("-")
+    form_name = parts[-1] if parts else ""
+    return any(kw in form_name for kw in OPERATION_SERVICE_FORM_KEYWORDS)

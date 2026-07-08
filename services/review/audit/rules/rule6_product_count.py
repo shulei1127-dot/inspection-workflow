@@ -1,11 +1,15 @@
 """规则 6：产品信息关联个数 = 配置项下单套数"""
 
 from services.review.audit.schemas import DeliveryItem, ProductInfo, RuleResult
-from services.review.audit.product_type import extract_short_product_name
+from services.review.audit.product_type import extract_short_product_name, is_operation_service_item
 
 
 def rule6_product_count(delivery_items: list[DeliveryItem], product_details: list[ProductInfo]) -> RuleResult:
-    new_purchase_items = [item for item in delivery_items if not _is_renewal_item(item.product_category)]
+    # 排除续保和运营服务类交付项（运营服务不是产品，没有产品实例是正常的）
+    new_purchase_items = [
+        item for item in delivery_items
+        if not _is_renewal_item(item.product_category) and not is_operation_service_item(item.product_category)
+    ]
 
     # 预期数量（按产品名累加配置项套数）
     config_count: dict[str, int] = {}
@@ -22,11 +26,11 @@ def rule6_product_count(delivery_items: list[DeliveryItem], product_details: lis
         name = extract_short_product_name(product.product_category)
         product_count[name] = product_count.get(name, 0) + 1
 
-    # 纯续保项目
+    # 纯续保/纯运营服务项目
     if not new_purchase_items:
         actual_devices = len([p for p in product_details if not p.is_renewal_record])
         if actual_devices == 0:
-            return RuleResult(rule_id=6, rule_name="产品个数=配置项套数", result="不通过", message="纯续保项目但无产品实例")
+            return RuleResult(rule_id=6, rule_name="产品个数=配置项套数", result="通过", message="运营服务类项目，无需产品实例")
         return RuleResult(rule_id=6, rule_name="产品个数=配置项套数", result="通过", message=f"续保项目，{actual_devices} 台设备")
 
     mismatches: list[str] = []

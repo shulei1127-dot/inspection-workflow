@@ -35,6 +35,13 @@
         <h3>待派单记录</h3>
         <div class="header-right">
           <span class="count-label">共 <strong>{{ dispatchPending.length }}</strong> 条待派单</span>
+          <el-button
+            size="small"
+            :loading="dispatchLoading"
+            @click="loadDispatchPending(true)"
+          >
+            刷新
+          </el-button>
         </div>
       </div>
       <div v-if="dispatchLoading" v-loading="true" style="height: 80px"></div>
@@ -87,6 +94,13 @@
         <h3>可发送邮件记录</h3>
         <div class="header-right">
           <span class="count-label">共 <strong>{{ emailPending.length }}</strong> 条可发送</span>
+          <el-button
+            size="small"
+            :loading="emailLoading"
+            @click="loadEmailPending(true)"
+          >
+            刷新
+          </el-button>
           <el-button
             v-if="emailPending.length > 0"
             size="small"
@@ -410,10 +424,10 @@ async function handleProbe() {
   }
 }
 
-async function loadDispatchPending() {
+async function loadDispatchPending(forceRefresh = false) {
   dispatchLoading.value = true
   try {
-    const res = await getDispatchPending()
+    const res = await getDispatchPending(forceRefresh)
     dispatchPending.value = res.pending || []
   } catch {
     dispatchPending.value = []
@@ -441,10 +455,10 @@ async function handleManualDispatch(row: any) {
   }
 }
 
-async function loadEmailPending() {
+async function loadEmailPending(forceRefresh = false) {
   emailLoading.value = true
   try {
-    const res = await getEmailPending()
+    const res = await getEmailPending(forceRefresh)
     emailPending.value = res.pending || []
   } catch {
     emailPending.value = []
@@ -620,8 +634,8 @@ function formatTime(iso: string | null) {
 }
 
 onMounted(() => {
-  loadDispatchPending()
-  loadEmailPending()
+  loadDispatchPending(true)
+  loadEmailPending(true)
   loadPreAnalysis()
   loadLogs()
 })

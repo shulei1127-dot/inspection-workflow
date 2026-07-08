@@ -296,6 +296,11 @@ async def run_closure_check(db: Session) -> dict:
     return result
 
 
+# Stage name where the responsible person (负责人) must be assigned.
+# At this stage, only the work order creator can set the responsible person.
+_ASSIGN_RESPONSIBLE_STAGE = "指定工单负责人"
+
+
 async def _close_single_work_order(
     db: Session,
     wo: WorkOrder,
@@ -304,7 +309,11 @@ async def _close_single_work_order(
     """Close a single work order in PTS.
 
     Steps:
-    1. Assign work order to default assignee (舒磊)
+    0. Query PTS for creator and current stage → determine assignment strategy
+    1a. Creator is someone else + stage is "指定工单负责人" → manual
+    1b. Creator is someone else + stage is after "指定工单负责人"
+        → add 舒磊 as member, then assign (update_work_order_claim_by)
+    1c. Creator is 舒磊 → directly assign (update_work_order_claim_by)
     2. Download inspection reports from AITable and upload to PTS
     3. Add note to PTS work order (with file IDs if upload succeeded)
     4. Advance stage via confirm_work_order_stage until reaching 审核工单
@@ -315,7 +324,67 @@ async def _close_single_work_order(
         "failed" - 失败
         "manual" - 需要人工处理（权限错误等）
     """
-    # 1. Assign work order to default assignee
+    # ── Step 0: Query PTS for creator and current stage ──
+    creator_id = ""
+    stage_name = ""
+    stage_sequence = 0
+    try:
+        pts_status = await pts_client.query_work_order_status(wo.pts_order_id)
+        if pts_status:
+            creator = pts_status.get("creator") or {}
+            creator_id = creator.get("id", "")
+            current_stage = pts_status.get("current_stage") or {}
+            stage_name = current_stage.get("name", "")
+            stage_sequence = current_stage.get("sequence", 0)
+            logger.info(
+                "Work order %s: creator=%s, stage=%s (seq=%s)",
+                wo.pts_order_id, creator_id, stage_name, stage_sequence,
+            )
+    except Exception as e:
+        logger.warning("Failed to query PTS status for %s: %s", wo.pts_order_id, e)
+        # Fall through — will attempt best-effort assignment below
+
+    # ── Step 1: Assign work order to 舒磊 ──
+    is_creator_shulei = (creator_id == _DEFAULT_ASSIGNEE_ID)
+    is_assign_stage = (stage_name == _ASSIGN_RESPONSIBLE_STAGE)
+
+    if not is_creator_shulei and is_assign_stage:
+        # Case 1: Other creator + "指定工单负责人" stage → manual
+        # Only the creator can assign the responsible person at this stage.
+        reason = (
+            f"工单由他人（{creator_id}）创建且当前阶段为「{stage_name}」，"
+            f"仅创建者可设置负责人，需要人工处理"
+        )
+        logger.warning("Work order %s needs manual processing: %s", wo.pts_order_id, reason)
+        _log_trigger(db, wo, "closure_manual", reason)
+        return "manual"
+
+    if not is_creator_shulei:
+        # Case 2: Other creator + stage after "指定工单负责人"
+        # Add 舒磊 to the project first, then claim the work order.
+        logger.info(
+            "Work order %s created by %s (stage=%s), adding 舒磊 as member first",
+            wo.pts_order_id, creator_id, stage_name,
+        )
+        try:
+            member_added = await pts_client.add_work_order_member(
+                wo.pts_order_id, _DEFAULT_ASSIGNEE_ID,
+            )
+            if member_added:
+                logger.info("Added 舒磊 as member of work order %s", wo.pts_order_id)
+            else:
+                # Member add may fail if already a member or API doesn't support it.
+                # Don't block — still try claim_by below.
+                logger.info(
+                    "add_work_order_member returned False for %s (may already be a member), continuing",
+                    wo.pts_order_id,
+                )
+        except Exception as e:
+            logger.warning("Failed to add member to work order %s: %s", wo.pts_order_id, e)
+            # Don't block — still try claim_by below
+
+    # Case 2 & 3: Claim the work order (Case 3: creator is 舒磊, direct assign)
+    assign_success = False
     try:
         mutation = """
         mutation {
@@ -326,13 +395,18 @@ async def _close_single_work_order(
         }
         """ % (wo.pts_order_id, _DEFAULT_ASSIGNEE_ID)
         result = await pts_client.pts_graphql_query(mutation)
-        assign_result = result.get("update_work_order_claim_by", False)
-        logger.info("Assigned work order %s to default assignee: success=%s", wo.pts_order_id, assign_result)
+        assign_success = result.get("update_work_order_claim_by", False)
+        logger.info("Assigned work order %s to 舒磊: success=%s", wo.pts_order_id, assign_success)
     except Exception as e:
-        logger.warning("Failed to assign work order %s: %s", wo.pts_order_id, e)
-        # Continue even if assignment fails
+        error_msg = str(e)
+        logger.warning("Failed to assign work order %s to 舒磊: %s", wo.pts_order_id, error_msg)
+        # If assignment fails with permission error and we're in case 2, try manual
+        if not is_creator_shulei and ("no permission" in error_msg or "需要设置负责人" in error_msg):
+            reason = f"无法将工单指派给舒磊: {error_msg}"
+            _log_trigger(db, wo, "closure_manual", reason)
+            return "manual"
 
-    # 2. Download inspection reports from AITable and upload to PTS
+    # ── Step 2: Download inspection reports from AITable and upload to PTS ──
     pts_file_ids: list[str] = []
     if isinstance(report_attachments, list) and len(report_attachments) > 0:
         try:
@@ -347,7 +421,7 @@ async def _close_single_work_order(
         except Exception as e:
             logger.error("Report upload failed for work order %s: %s", wo.pts_order_id, e)
 
-    # 3. Add note to PTS work order (with file IDs if available)
+    # ── Step 3: Add note to PTS work order ──
     attachment_names = []
     for att in report_attachments:
         if isinstance(att, dict):
@@ -363,20 +437,20 @@ async def _close_single_work_order(
         note_text += f"，附件: {', '.join(attachment_names)}"
 
     try:
-        result = await pts_client.add_work_order_info(
+        note_result = await pts_client.add_work_order_info(
             work_order_id=wo.pts_order_id,
             note=note_text,
             file_ids=pts_file_ids if pts_file_ids else None,
         )
-        logger.info("Added note to PTS work order %s: success=%s (file_ids=%s)", wo.pts_order_id, result, pts_file_ids)
+        logger.info("Added note to PTS work order %s: success=%s (file_ids=%s)", wo.pts_order_id, note_result, pts_file_ids)
     except Exception as e:
         logger.error("Failed to add note to PTS work order %s: %s", wo.pts_order_id, e)
 
-    # 4. Advance stage until reaching "审核工单"
+    # ── Step 4: Advance stage until reaching "审核工单" ──
     success_count = 0
     target_reached = False
-    needs_manual = False  # 是否需要人工处理
-    manual_reason = ""  # 人工处理原因
+    needs_manual = False
+    manual_reason = ""
 
     for attempt in range(_MAX_STAGE_CONFIRM_ATTEMPTS):
         try:
@@ -388,39 +462,36 @@ async def _close_single_work_order(
 
             if confirm_result is True:
                 success_count += 1
-                # Check if we've reached the target stage
                 pts_status = await pts_client.query_work_order_status(wo.pts_order_id)
                 if pts_status:
                     current_stage = pts_status.get("current_stage") or {}
-                    stage_name = current_stage.get("name", "")
-                    if stage_name == _TARGET_CLOSURE_STAGE:
+                    cur_stage_name = current_stage.get("name", "")
+                    if cur_stage_name == _TARGET_CLOSURE_STAGE:
                         target_reached = True
                         logger.info(
                             "Reached target stage '%s' for work order %s",
-                            stage_name, wo.pts_order_id,
+                            cur_stage_name, wo.pts_order_id,
                         )
                         break
-                    elif stage_name in _CLOSURE_STAGE_NAMES:
-                        # Already past target stage (shouldn't happen)
+                    elif cur_stage_name in _CLOSURE_STAGE_NAMES:
                         target_reached = True
                         logger.info(
                             "Work order %s already in closure stage '%s'",
-                            wo.pts_order_id, stage_name,
+                            wo.pts_order_id, cur_stage_name,
                         )
                         break
                 continue
             elif confirm_result is None or confirm_result is False:
-                # Can't advance further, check current stage
                 if success_count > 0:
                     pts_status = await pts_client.query_work_order_status(wo.pts_order_id)
                     if pts_status:
                         current_stage = pts_status.get("current_stage") or {}
-                        stage_name = current_stage.get("name", "")
-                        if stage_name in _CLOSURE_STAGE_NAMES:
+                        cur_stage_name = current_stage.get("name", "")
+                        if cur_stage_name in _CLOSURE_STAGE_NAMES:
                             target_reached = True
                             logger.info(
                                 "Work order %s in closure stage '%s' after %d attempts",
-                                wo.pts_order_id, stage_name, success_count,
+                                wo.pts_order_id, cur_stage_name, success_count,
                             )
                 if not target_reached:
                     logger.warning(
@@ -430,7 +501,6 @@ async def _close_single_work_order(
                 break
         except Exception as e:
             error_msg = str(e)
-            # 检测权限错误
             if "no permission" in error_msg or "需要设置负责人" in error_msg:
                 needs_manual = True
                 manual_reason = error_msg
@@ -445,7 +515,7 @@ async def _close_single_work_order(
                 )
             break
 
-    # 3. Return result
+    # ── Step 5: Return result ──
     if needs_manual:
         _log_trigger(db, wo, "closure_manual", f"需要人工处理: {manual_reason}")
         return "manual"
