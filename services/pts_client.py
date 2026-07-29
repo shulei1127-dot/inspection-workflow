@@ -12,6 +12,7 @@ Mutations for work order closure:
 """
 
 import asyncio
+import hashlib
 import logging
 import re
 import threading
@@ -598,17 +599,30 @@ async def query_work_order_status(pts_order_id: str) -> dict | None:
     return result.get("workOrderByID")
 
 
-async def confirm_work_order_stage(work_order_id: str) -> bool | None:
+async def confirm_work_order_stage(work_order_id: str, claim_by: str | None = None) -> bool | None:
     """Advance a PTS work order to the next stage.
 
     PTS confirm_work_order_stage mutation returns Boolean (true on success, null on failure).
     May need to be called multiple times to advance through all stages to finished.
+
+    Args:
+        work_order_id: PTS work order ID.
+        claim_by: Optional PTS user ID to set as responsible person.
+            MUST be passed when advancing from the "指定工单负责人" stage,
+            otherwise PTS returns "需要设置负责人" error.
+
+    Returns:
+        True on success, None/False on failure.
     """
+    claim_part = ""
+    if claim_by:
+        claim_part = f', claim_by: "{claim_by}"'
+
     mutation = """
     mutation {
-      confirm_work_order_stage(id: "%s")
+      confirm_work_order_stage(id: "%s"%s)
     }
-    """ % work_order_id
+    """ % (work_order_id, claim_part)
 
     result = await pts_graphql_query(mutation)
     return result.get("confirm_work_order_stage")
@@ -617,26 +631,211 @@ async def confirm_work_order_stage(work_order_id: str) -> bool | None:
 async def add_work_order_member(work_order_id: str, user_id: str) -> bool:
     """Add a user as a member to a PTS work order's delivery project.
 
-    This is needed when the work order was created by someone else and the
-    default assignee (舒磊) is not a project member. Without being a member,
-    the assign mutation will fail with "no permission" or "需要设置负责人".
+    This is needed so that the user (舒磊) can operate on the work order
+    (change claim_by, advance stage, etc.) even if they weren't originally
+    a project member.
 
-    Uses the update_work_order mutation with members field to add the user.
+    Uses update_product_delivery_user_list mutation with the delivery ID.
+    Note: update_work_order(id, input: {members}) does NOT work — PTS returns
+    "Field 'members' is not defined by type 'WorkOrderUpdateParam'".
 
-    Returns True on success, False on failure.
+    Args:
+        work_order_id: PTS work order ID.
+        user_id: PTS user ID to add (e.g. 舒磊's ID).
+
+    Returns:
+        True on success, False on failure.
     """
+    # First, get the delivery ID from the work order
+    delivery_id = await _get_delivery_id(work_order_id)
+    if not delivery_id:
+        logger.warning("Cannot add member: no delivery ID for work order %s", work_order_id)
+        return False
+
     mutation = """
     mutation {
-      update_work_order(
+      update_product_delivery_user_list(
         id: "%s",
-        input: { members: ["%s"] }
+        user: "%s"
       )
     }
-    """ % (work_order_id, user_id)
+    """ % (delivery_id, user_id)
 
     try:
         result = await pts_graphql_query(mutation)
-        return result.get("update_work_order", False) is not False
+        # Returns null on success (PTS convention for void mutations)
+        if result.get("update_product_delivery_user_list") is not None:
+            logger.info("Added user %s to delivery %s for work order %s", user_id, delivery_id, work_order_id)
+            return True
+        # null return can also mean success for PTS mutations
+        logger.info("update_product_delivery_user_list returned null for delivery %s (likely success)", delivery_id)
+        return True
     except Exception as e:
-        logger.error("Failed to add member %s to work order %s: %s", user_id, work_order_id, e)
+        logger.error("Failed to add member %s to delivery %s for work order %s: %s", user_id, delivery_id, work_order_id, e)
         return False
+
+
+async def _get_delivery_id(work_order_id: str) -> str | None:
+    """Get the delivery ID from a PTS work order.
+
+    The delivery ID is needed for update_product_delivery_user_list
+    (adding project members) and other delivery-level operations.
+    """
+    query = """
+    {
+      workOrderByID(id: \"%s\") {
+        delivery { id }
+      }
+    }
+    """ % work_order_id
+
+    try:
+        result = await pts_graphql_query(query)
+        wo = result.get("workOrderByID") or {}
+        delivery = wo.get("delivery") or {}
+        return delivery.get("id")
+    except Exception as e:
+        logger.warning("Failed to get delivery ID for work order %s: %s", work_order_id, e)
+        return None
+
+
+async def query_work_order_details(pts_order_id: str) -> dict | None:
+    """Query the complete PTS state needed by closure V2.
+
+    This deliberately lives beside, rather than replacing, the smaller V1
+    status query so existing callers keep their response contract.
+    """
+    query = """
+    {
+      workOrderByID(id: "%s") {
+        id
+        is_finished
+        current_stage { name sequence }
+        creator { id name username }
+        claim_by { id name username }
+        info { id note file { id filename } }
+      }
+    }
+    """ % pts_order_id
+    result = await pts_graphql_query(query)
+    return result.get("workOrderByID") if result else None
+
+
+async def download_attachment_with_hash(attachment: dict) -> dict:
+    """Download an AITable attachment without retaining its URL in state/logs."""
+    filename = str(attachment.get("filename") or "report.pdf")
+    url = attachment.get("url") or attachment.get("downloadUrl") or ""
+    if not url:
+        return {
+            "status": "failed",
+            "filename": filename,
+            "error": "附件缺少下载地址",
+            "error_class": "permanent",
+        }
+
+    try:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+        content = response.content
+        return {
+            "status": "downloaded",
+            "filename": filename,
+            "size": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "content": content,
+        }
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        return {
+            "status": "failed",
+            "filename": filename,
+            "error": f"附件下载 HTTP {status}",
+            "error_class": "retryable" if status == 429 or status >= 500 else "permanent",
+        }
+    except (httpx.HTTPError, TimeoutError, asyncio.TimeoutError) as exc:
+        logger.warning("Attachment download failed for %s: %s", filename, type(exc).__name__)
+        return {
+            "status": "failed",
+            "filename": filename,
+            "error": "附件下载网络异常",
+            "error_class": "retryable",
+        }
+
+
+async def upload_file_via_api_with_retry(
+    file_content: bytes,
+    filename: str,
+    *,
+    max_retries: int | None = None,
+    backoff_seconds: float | None = None,
+    max_backoff_seconds: float | None = None,
+) -> dict:
+    """Upload a file and return a structured, retryable result for V2."""
+    settings = get_settings()
+    upload_url = settings.pts_upload_url
+    if not upload_url:
+        return {"status": "failed", "error": "PTS upload URL 未配置", "error_class": "permanent"}
+
+    retries = settings.inspection_closure_upload_max_retries if max_retries is None else max_retries
+    base_wait = settings.inspection_closure_retry_backoff_seconds if backoff_seconds is None else backoff_seconds
+    max_wait = settings.inspection_closure_retry_max_backoff_seconds if max_backoff_seconds is None else max_backoff_seconds
+
+    for attempt in range(retries + 1):
+        try:
+            await _rate_limit()
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.post(
+                    upload_url,
+                    headers={"Authorization": f"Bearer {settings.pts_api_token}"},
+                    files={"file": (filename, file_content)},
+                    data={"cat": "work_order"},
+                )
+
+            status_code = response.status_code
+            if status_code == 401:
+                return {"status": "failed", "error": "PTS 上传认证失败", "error_class": "permission"}
+            if status_code == 429 or status_code >= 500:
+                if attempt < retries:
+                    wait = min(max_wait, base_wait * (2 ** attempt))
+                    logger.warning(
+                        "PTS upload retryable HTTP %d for %s; retry %d/%d in %.1fs",
+                        status_code, filename, attempt + 1, retries, wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                return {
+                    "status": "failed",
+                    "error": f"PTS 上传 HTTP {status_code}",
+                    "error_class": "retryable",
+                }
+            if status_code != 200:
+                return {
+                    "status": "failed",
+                    "error": f"PTS 上传 HTTP {status_code}",
+                    "error_class": "permanent",
+                }
+
+            data = response.json()
+            if data.get("err") != 0 or not data.get("id"):
+                return {
+                    "status": "failed",
+                    "error": "PTS 上传返回无效结果",
+                    "error_class": "permanent",
+                }
+            return {"status": "uploaded", "pts_file_id": data["id"], "filename": filename}
+        except (httpx.HTTPError, TimeoutError, asyncio.TimeoutError) as exc:
+            if attempt < retries:
+                wait = min(max_wait, base_wait * (2 ** attempt))
+                logger.warning(
+                    "PTS upload network retry for %s (%s); retry %d/%d in %.1fs",
+                    filename, type(exc).__name__, attempt + 1, retries, wait,
+                )
+                await asyncio.sleep(wait)
+                continue
+            return {"status": "failed", "error": "PTS 上传网络异常", "error_class": "retryable"}
+        except Exception:
+            logger.exception("PTS upload failed for %s", filename)
+            return {"status": "failed", "error": "PTS 上传异常", "error_class": "permanent"}
+
+    return {"status": "failed", "error": "PTS 上传重试耗尽", "error_class": "retryable"}

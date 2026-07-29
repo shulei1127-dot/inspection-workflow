@@ -419,6 +419,9 @@ async def write_audit_to_dingtalk(result: AuditResult) -> dict[str, Any]:
                 notes.append(tag)
     if result.value_added_service_reminder:
         notes.append(result.value_added_service_reminder)
+    # 转人工审核时注明原因
+    if result.conclusion == "转人工审核" and result.manual_review_reason:
+        notes.append("转人工原因：" + result.manual_review_reason)
 
     cells: dict[str, Any] = {
         "审核是否通过": pass_label,
@@ -473,12 +476,25 @@ async def write_audit_to_dingtalk(result: AuditResult) -> dict[str, Any]:
         # 审核拒绝的项目额外写入对应区域表
         if result.conclusion == "不通过" and result.region:
             try:
-                await _write_to_region_sheet(result, base_id=base_id, corp_id=corp_id)
+                region_result = await _write_to_region_sheet(result, base_id=base_id, corp_id=corp_id)
+                # 写入区域表成功后，发钉钉通知
+                if region_result.get("success"):
+                    await _notify_region_reject(result)
             except Exception as e:
                 logger.warning("Dingtalk region sheet write failed (main record OK): %s", e)
 
 
 # ── 辅助函数 ─────────────────────────────────────────────────
+
+async def _notify_region_reject(result: AuditResult) -> None:
+    """区域表写入成功后，发钉钉通知简要提醒。"""
+    from services.dingtalk_notifier import send_dingtalk_notification
+
+    title = "🚫 审核拒绝项目已写入钉钉文档"
+    content = f"项目「{result.customer_name or '未知客户'}」审核不通过，已写入 **{result.region}** 交付转售后回访进展数据表。"
+
+    await send_dingtalk_notification(title, content)
+
 
 def _now_iso_cn() -> str:
     now = datetime.now(timezone(timedelta(hours=8)))

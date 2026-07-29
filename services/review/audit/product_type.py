@@ -42,7 +42,7 @@ def is_mainstream_product(product: ProductInfo) -> bool:
 
 
 def is_key_product(product: ProductInfo) -> bool:
-    text = product.summary or product.product_category
+    text = f"{product.summary or ''} {product.product_category or ''}"
     return any(kw in text for kw in KEY_PRODUCT_KEYWORDS)
 
 

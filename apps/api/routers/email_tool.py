@@ -488,8 +488,8 @@ async def send_inspection_email(
 
         # Auto-close the corresponding work order
         try:
-            from services.pts_closure_service import close_work_order_after_email
-            closure_result = await close_work_order_after_email(db, record_id)
+            from services.pts_closure_service import handle_email_success
+            closure_result = await handle_email_success(db, record_id, legacy_closure=True)
             logger.info("Auto-closure result for record %s: %s", record_id, closure_result)
         except Exception as e:
             logger.warning("Auto-closure failed for record %s: %s", record_id, e)

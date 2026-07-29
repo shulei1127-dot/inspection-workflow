@@ -59,7 +59,7 @@ async def dispatch_from_aitable(
     if customer_name:
         wo = db.query(WorkOrder).filter(WorkOrder.customer_name == customer_name).first()
 
-    work_order_id = wo.id if wo else uuid.uuid4()
+    work_order_id = wo.id if wo else None
 
     result = await _call_yunji_dispatch(
         db, work_order_id, pts_url, supplier,
@@ -245,7 +245,7 @@ async def email_from_aitable(
     if customer_name:
         wo = db.query(WorkOrder).filter(WorkOrder.customer_name == customer_name).first()
 
-    work_order_id = wo.id if wo else uuid.uuid4()
+    work_order_id = wo.id if wo else None
 
     # Create trigger log
     log = TriggerLog(

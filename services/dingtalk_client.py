@@ -108,6 +108,7 @@ async def query_records(
     fetch_all: bool = False,
     filters: str | None = None,
     field_ids: str | None = None,
+    strict: bool = False,
 ) -> list[dict]:
     """Query records from the configured AITable.
 
@@ -120,6 +121,8 @@ async def query_records(
                  Reduces records returned by AITable before local filtering.
         field_ids: Comma-separated field IDs to return (projection).
                    Reduces payload size by only fetching needed columns.
+        strict: If True, raise when dws does not return a complete records
+                response. Use this for safety-critical deduplication queries.
     """
     page_limit = min(limit, 100)  # AITable API limit max is 100
     all_records = []
@@ -144,22 +147,34 @@ async def query_records(
 
         if result is None:
             logger.warning("query_records: dws returned None")
+            if strict:
+                raise RuntimeError("AITable record query failed")
             break
 
-        # dws returns {"data": {"records": [...], "nextCursor": ...}}
         if isinstance(result, dict):
             data = result.get("data", result)
-            records = data.get("records", [])
-            if isinstance(records, list):
-                all_records.extend(records)
+            if not isinstance(data, dict) or "records" not in data:
+                if strict:
+                    raise RuntimeError("AITable record query returned an incomplete response")
+                break
+            records = data["records"]
+            if not isinstance(records, list):
+                if strict:
+                    raise RuntimeError("AITable record query returned invalid records")
+                break
+            all_records.extend(records)
             next_cursor = data.get("nextCursor", "")
             if not fetch_all or not next_cursor or len(records) < page_limit:
                 break
             cursor = next_cursor
         elif isinstance(result, list):
+            if strict:
+                raise RuntimeError("AITable record query returned an unexpected list response")
             all_records.extend(result)
             break
         else:
+            if strict:
+                raise RuntimeError("AITable record query returned an invalid response")
             break
 
     logger.debug("query_records: found %d records total", len(all_records))

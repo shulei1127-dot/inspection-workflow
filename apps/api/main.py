@@ -26,9 +26,14 @@ async def lifespan(app: FastAPI):
 
     # Clean up any stale "running" sync logs from previous crashes
     from services.sync_service import cleanup_stale_running_logs
+    from services.pts_closure_service import recover_stalled_closure_wip
     from core.db import SessionLocal
     with SessionLocal() as db:
         cleanup_stale_running_logs(db)
+        recovered = recover_stalled_closure_wip(db)
+        if recovered:
+            import logging
+            logging.getLogger(__name__).info("Recovered %d stalled closure work orders", recovered)
 
     # Start scheduler
     scheduler = None
@@ -43,9 +48,9 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
+    # Shutdown: give running jobs up to 30 seconds to finish
     if scheduler:
-        scheduler.shutdown(wait=False)
+        scheduler.shutdown(wait=True)
 
 
 settings = get_settings()

@@ -11,7 +11,14 @@ from sqlalchemy.orm import Session
 from core.db import get_db
 from models.sync_log import SyncLog
 from models.work_order import WorkOrder
-from services.sync_service import run_sync, push_to_aitable, _sync_to_aitable, adjust_planned_completion_to_month_end, current_month
+from services.sync_service import (
+    run_sync,
+    push_to_aitable,
+    _sync_to_aitable,
+    _build_dispatch_aitable_lookup,
+    _acquire_dispatch_write_lock,
+    current_month,
+)
 from apps.api.utils import fmt_cst
 
 logger = logging.getLogger(__name__)
@@ -31,8 +38,10 @@ async def trigger_sync(
     """Pull PTS work orders to local DB and optionally push to DingTalk AITable."""
     log = await run_sync(db, trigger_source="manual", sync_month=sync_month, push_to_aitable=push)
 
-    # Auto-adjust planned completion to month end
-    adjust_result = await adjust_planned_completion_to_month_end(db, month=log.sync_month)
+    # Planned-completion write-back is an explicit operation at
+    # /api/work-orders/adjust-planned-completion; a normal sync must remain
+    # local-only for existing work orders.
+    adjust_result = {"status": "not_run", "message": "请使用独立的计划完成时间调整接口"}
 
     return {
         "status": log.status,
@@ -60,31 +69,104 @@ async def batch_push_to_dingtalk(
     req: BatchPushRequest,
     db: Session = Depends(get_db),
 ):
-    """Batch push selected work orders by ID list to DingTalk AITable."""
+    """Retry AITable creation only for explicitly eligible new work orders."""
     pushed = 0
     failed = 0
+    skipped = 0
+    items: list[dict] = []
+    seen_ids: set[str] = set()
+    seen_pts_ids: set[str] = set()
+    candidates: list[WorkOrder] = []
     sync_month = current_month()
 
     for wo_id_str in req.work_order_ids:
+        if wo_id_str in seen_ids:
+            skipped += 1
+            items.append({"work_order_id": wo_id_str, "status": "skipped", "reason": "duplicate request"})
+            continue
+        seen_ids.add(wo_id_str)
+
         try:
             wo_id = uuid.UUID(wo_id_str)
-            wo = db.query(WorkOrder).filter(WorkOrder.id == wo_id).first()
-            if wo:
-                # Reset dt_record_id to force create new record (instead of update)
-                wo.dt_record_id = None
-                wo.dt_sync_status = "pending"
-                await _sync_to_aitable(db, wo, sync_month=sync_month)
-                # Check if sync was actually successful
-                if wo.dt_sync_status == "synced" and wo.dt_record_id:
-                    pushed += 1
-                else:
-                    logger.warning(f"Work order {wo.pts_order_id} sync status: {wo.dt_sync_status}, record_id: {wo.dt_record_id}")
-                    failed += 1
-            else:
-                failed += 1
-        except Exception as e:
-            logger.error(f"Failed to push work order {wo_id_str}: {e}")
+        except ValueError:
             failed += 1
+            items.append({"work_order_id": wo_id_str, "status": "failed", "reason": "invalid work order id"})
+            continue
+
+        wo = db.query(WorkOrder).filter(WorkOrder.id == wo_id).first()
+        if not wo:
+            failed += 1
+            items.append({"work_order_id": wo_id_str, "status": "failed", "reason": "work order not found"})
+            continue
+
+        if not wo.dt_create_eligible or wo.dt_record_id:
+            skipped += 1
+            items.append({
+                "work_order_id": wo_id_str,
+                "pts_order_id": wo.pts_order_id,
+                "status": "skipped",
+                "reason": "not an eligible new work order",
+            })
+            continue
+
+        if wo.pts_order_id in seen_pts_ids:
+            skipped += 1
+            items.append({
+                "work_order_id": wo_id_str,
+                "pts_order_id": wo.pts_order_id,
+                "status": "skipped",
+                "reason": "duplicate PTS order in request",
+            })
+            continue
+
+        seen_pts_ids.add(wo.pts_order_id)
+        candidates.append(wo)
+
+    if candidates:
+        try:
+            _acquire_dispatch_write_lock(db)
+            aitable_lookup = await _build_dispatch_aitable_lookup()
+        except Exception as e:
+            logger.error("AITable dedup query failed; aborting batch push: %s", e)
+            for wo in candidates:
+                failed += 1
+                items.append({
+                    "work_order_id": str(wo.id),
+                    "pts_order_id": wo.pts_order_id,
+                    "status": "failed",
+                    "reason": "AITable dedup query failed",
+                })
+        else:
+            for wo in candidates:
+                try:
+                    wo.dt_sync_status = "pending"
+                    await _sync_to_aitable(
+                        db,
+                        wo,
+                        sync_month=sync_month,
+                        aitable_lookup=aitable_lookup,
+                    )
+                    if wo.dt_sync_status == "synced" and wo.dt_record_id:
+                        pushed += 1
+                        item_status = "synced"
+                    else:
+                        failed += 1
+                        item_status = "failed"
+                    items.append({
+                        "work_order_id": str(wo.id),
+                        "pts_order_id": wo.pts_order_id,
+                        "status": item_status,
+                    })
+                except Exception as e:
+                    logger.error("Failed to push work order %s: %s", wo.pts_order_id, e)
+                    wo.dt_sync_status = "failed"
+                    failed += 1
+                    items.append({
+                        "work_order_id": str(wo.id),
+                        "pts_order_id": wo.pts_order_id,
+                        "status": "failed",
+                        "reason": str(e)[:200],
+                    })
 
     db.commit()
 
@@ -92,7 +174,9 @@ async def batch_push_to_dingtalk(
         "status": "success" if failed == 0 else "partial",
         "pushed": pushed,
         "failed": failed,
+        "skipped": skipped,
         "total": len(req.work_order_ids),
+        "items": items,
     }
 
 

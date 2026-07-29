@@ -101,8 +101,8 @@ def extract_engineer(val) -> str | None:
         for u in val:
             if not isinstance(u, dict):
                 continue
-            # Prefer userId (内部用户), fall back to userName (外部用户), then userRef
-            name = u.get("userId") or u.get("userName") or u.get("userRef", "")
+            # Prefer userName (human-readable), fall back to userId, then userRef
+            name = u.get("userName") or u.get("userId") or u.get("userRef", "")
             if name:
                 names.append(name)
         return ", ".join(names) if names else None
@@ -121,6 +121,27 @@ def extract_user_ids(val) -> str | None:
     if isinstance(val, str):
         return val
     return None
+
+
+def extract_pts_order_id_from_link(link_val) -> str | None:
+    """从 AITable 巡检工单链接字段值提取 pts_order_id。
+
+    巡检工单链接格式: https://pts.chaitin.net/project/order/{pts_order_id}
+    AITable URL 字段返回格式: {"link": "...", "text": "..."} 或纯字符串。
+
+    用于构建 AITable 去重映射，避免同一 PTS 工单在 AITable 中创建多条记录。
+    """
+    import re
+
+    url = None
+    if isinstance(link_val, dict):
+        url = link_val.get("link") or link_val.get("text", "")
+    elif isinstance(link_val, str) and link_val.startswith("http"):
+        url = link_val
+    if not url:
+        return None
+    match = re.search(r'/project/order/([^/?]+)', url)
+    return match.group(1) if match else None
 
 
 # ── Shared business constants ────────────────────────────────────────────────

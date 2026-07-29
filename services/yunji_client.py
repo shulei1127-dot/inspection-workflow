@@ -18,6 +18,7 @@ Use node extract_cookie.js to extract from the Chrome session.
 import asyncio
 import json
 import logging
+import threading
 import time
 
 import httpx
@@ -30,18 +31,32 @@ YUNJI_BASE = "https://yunji.chaitin.cn"
 
 # Rate limiting for yunji API
 _yunji_last_call: float = 0.0
-_yunji_rate_lock = asyncio.Lock()
+_yunji_rate_lock = threading.Lock()  # threading.Lock is safe across asyncio event loops
 _YUNJI_RATE_INTERVAL = 0.3  # ~3 req/s
 
 
 async def _rate_limit() -> None:
+    """Enforce yunji API rate limit (~3 req/s).
+
+    Uses threading.Lock instead of asyncio.Lock because APScheduler runs
+    sync jobs that call asyncio.run() in separate threads, creating new
+    event loops. asyncio.Lock is bound to the event loop where it was
+    created and raises RuntimeError when used from a different loop.
+    threading.Lock has no such limitation.
+    """
     global _yunji_last_call
-    async with _yunji_rate_lock:
+    with _yunji_rate_lock:
         now = time.monotonic()
         elapsed = now - _yunji_last_call
         if elapsed < _YUNJI_RATE_INTERVAL:
-            await asyncio.sleep(_YUNJI_RATE_INTERVAL - elapsed)
-        _yunji_last_call = time.monotonic()
+            wait_time = _YUNJI_RATE_INTERVAL - elapsed
+            _yunji_last_call = now + wait_time
+        else:
+            wait_time = 0
+            _yunji_last_call = now
+
+    if wait_time > 0:
+        await asyncio.sleep(wait_time)
 
 
 def _get_cookie() -> str:
@@ -111,7 +126,14 @@ async def yunji_api(method: str, path: str, body: dict | None = None) -> dict:
         error_msg = data.get("message", json.dumps(data, ensure_ascii=False))
         raise RuntimeError(f"云集 API 错误 [{path}]: {error_msg}")
 
-    return data.get("data", data)
+    result = data.get("data", data)
+    # When "data" key exists but value is null (not absent), .get() returns None.
+    # This means the requested resource doesn't exist — treat as empty dict so callers
+    # don't crash with "'NoneType' object has no attribute 'get'".
+    if result is None:
+        logger.warning("云集 API 返回 data=null [%s %s]", method, path)
+        return {}
+    return result
 
 
 # ── Cookie Keepalive ──────────────────────────────────────────────────────

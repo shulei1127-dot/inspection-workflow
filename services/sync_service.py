@@ -13,13 +13,14 @@ import uuid
 from datetime import date, datetime, timezone
 import calendar
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from core.config import get_settings
 from models.sync_log import SyncLog
 from models.work_order import WorkOrder
 from services import dingtalk_client, pts_client
-from services.aitable_fields import DISPATCH, COMPLETION_STAGES, current_month
+from services.aitable_fields import DISPATCH, COMPLETION_STAGES, current_month, extract_pts_order_id_from_link
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,7 @@ async def run_sync(
                         id=uuid.uuid4(),
                         pts_order_id=pts_order_id,
                         dt_sync_status="synced",  # 标记为已同步，不再推送到AITable
+                        dt_create_eligible=False,
                         closure_status="已闭环",
                         **_extract_fields(raw),
                     )
@@ -117,15 +119,24 @@ async def run_sync(
                 continue
 
             if existing:
-                # Check if data changed
-                if _data_changed(existing, raw):
+                changed = _data_changed(existing, raw)
+                if changed:
                     _update_work_order(existing, raw)
-                    existing.dt_sync_status = "pending"
                     updated_count += 1
+
+                # Existing local work orders are local-only. The sole exception
+                # is a record explicitly marked as a new AITable candidate that
+                # has not been pushed yet; that candidate may be retried with
+                # the latest PTS fields.
+                if (
+                    existing.dt_create_eligible
+                    and not existing.dt_record_id
+                    and existing.dt_sync_status != "synced"
+                ):
                     pending_records.append(existing)
-                elif existing.dt_sync_status != "synced":
-                    # Data unchanged but AITable sync pending/failed
-                    pending_records.append(existing)
+                elif changed:
+                    existing.dt_create_eligible = False
+                    existing.dt_sync_status = "local_only"
                 else:
                     skipped_count += 1
             else:
@@ -133,6 +144,7 @@ async def run_sync(
                     id=uuid.uuid4(),
                     pts_order_id=pts_order_id,
                     dt_sync_status="pending",
+                    dt_create_eligible=True,
                     **_extract_fields(raw),
                 )
                 wo.raw_data = raw
@@ -144,31 +156,35 @@ async def run_sync(
 
         # 3. Push to DingTalk AITable (only if push_to_aitable=True)
         if push_to_aitable:
-            # Filter pending records if only_new_for_month is enabled
-            records_to_push = pending_records
+            records_to_push = [
+                wo for wo in pending_records
+                if wo.dt_create_eligible and not wo.dt_record_id
+            ]
             if only_new_for_month:
-                records_to_push = [
-                    wo for wo in pending_records
-                    if wo.dt_synced_month is None or wo.dt_synced_month != sync_month
-                ]
                 logger.info(
-                    "only_new_for_month enabled: filtered %d/%d records for month %s",
+                    "only_new_for_month enabled: %d eligible records remain for month %s",
                     len(records_to_push),
-                    len(pending_records),
-                    sync_month
+                    sync_month,
                 )
 
-            for wo in records_to_push:
-                try:
-                    await _sync_to_aitable(db, wo, sync_month=sync_month)
-                except Exception as e:
-                    logger.error("Failed to sync work order %s to AITable: %s", wo.pts_order_id, e)
-                    wo.dt_sync_status = "failed"
-            db.commit()
+            if records_to_push:
+                # Serialize the full query → dedup → write window.
+                _acquire_dispatch_write_lock(db)
+                # Build a strict dedup lookup before any create operation.
+                aitable_lookup = await _build_dispatch_aitable_lookup()
+                for wo in records_to_push:
+                    try:
+                        await _sync_to_aitable(
+                            db,
+                            wo,
+                            sync_month=sync_month,
+                            aitable_lookup=aitable_lookup,
+                        )
+                    except Exception as e:
+                        logger.error("Failed to sync work order %s to AITable: %s", wo.pts_order_id, e)
+                        wo.dt_sync_status = "failed"
+                db.commit()
 
-        # 4. Update closure_status from AITable data for synced records
-        if push_to_aitable:
-            await _update_closure_status_from_aitable(db)
 
         log.created_count = created_count
         log.updated_count = updated_count
@@ -224,7 +240,11 @@ async def push_to_aitable(db: Session, *, sync_month: str | None = None) -> dict
     from apps.api.routers.ws import broadcaster
 
     sync_month = sync_month or current_month()
-    q = db.query(WorkOrder).filter(WorkOrder.dt_sync_status != "synced")
+    q = db.query(WorkOrder).filter(
+        WorkOrder.dt_create_eligible.is_(True),
+        WorkOrder.dt_record_id.is_(None),
+        WorkOrder.dt_sync_status != "synced",
+    )
 
     if sync_month:
         parts = sync_month.split("-")
@@ -241,9 +261,24 @@ async def push_to_aitable(db: Session, *, sync_month: str | None = None) -> dict
     pushed = 0
     failed = 0
 
+    # AITable must be queried successfully before any create operation.
+    try:
+        _acquire_dispatch_write_lock(db)
+        aitable_lookup = await _build_dispatch_aitable_lookup()
+    except Exception as e:
+        logger.error("AITable dedup query failed; aborting push: %s", e)
+        return {
+            "status": "error",
+            "sync_month": sync_month,
+            "pushed": 0,
+            "failed": len(pending_records),
+            "total": len(pending_records),
+            "message": "AITable 去重查询失败，已中止推送以防止重复记录",
+        }
+
     for wo in pending_records:
         try:
-            await _sync_to_aitable(db, wo)
+            await _sync_to_aitable(db, wo, aitable_lookup=aitable_lookup)
             pushed += 1
         except Exception as e:
             logger.error("Failed to push work order %s to AITable: %s", wo.pts_order_id, e)
@@ -264,65 +299,141 @@ async def push_to_aitable(db: Session, *, sync_month: str | None = None) -> dict
     return result
 
 
-async def _sync_to_aitable(db: Session, wo: WorkOrder, sync_month: str | None = None) -> None:
-    """Sync a single work order to AITable (客户巡检派单 table)."""
+def _acquire_dispatch_write_lock(db: Session) -> None:
+    """Serialize dedup-query plus AITable writes across app instances."""
+    bind = db.get_bind()
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {
+        "key": "inspection-workflow:dispatch-aitable-write",
+    })
+
+
+async def _build_dispatch_aitable_lookup() -> dict[str, list[str]]:
+    """Build a strict PTS order ID → AITable record IDs lookup.
+
+    A missing or incomplete query is an error, not an empty table. This
+    fail-closed behavior prevents a transient dws failure from turning an
+    existing record into a new duplicate.
+    """
     settings = get_settings()
     if not settings.dt_dispatch_base_id or not settings.dt_dispatch_table_id:
-        logger.warning("AITable dispatch base_id or table_id not configured, skipping sync")
-        wo.dt_sync_status = "pending"
+        raise RuntimeError("AITable dispatch base_id/table_id is not configured")
+
+    records = await dingtalk_client.query_records(
+        limit=1000,
+        base_id=settings.dt_dispatch_base_id,
+        table_id=settings.dt_dispatch_table_id,
+        fetch_all=True,
+        strict=True,
+    )
+
+    lookup: dict[str, list[str]] = {}
+    link_field_id = DISPATCH["巡检工单链接"]
+    for record in records:
+        cells = record.get("cells", {})
+        pts_id = extract_pts_order_id_from_link(cells.get(link_field_id))
+        if not pts_id:
+            continue
+        record_id = record.get("recordId")
+        if not record_id:
+            raise RuntimeError(f"AITable record for PTS order {pts_id} has no recordId")
+        lookup.setdefault(pts_id, []).append(record_id)
+
+    duplicate_count = sum(1 for ids in lookup.values() if len(ids) > 1)
+    logger.info(
+        "Built DISPATCH AITable dedup lookup: %d pts_order_id mappings, %d duplicate conflicts",
+        len(lookup),
+        duplicate_count,
+    )
+    return lookup
+
+
+async def _sync_to_aitable(
+    db: Session,
+    wo: WorkOrder,
+    sync_month: str | None = None,
+    aitable_lookup: dict[str, list[str]] | None = None,
+) -> None:
+    """Create only eligible new work orders after strict URL deduplication.
+
+    Existing AITable records are reused by record ID without updating them.
+    No path in this function falls through from a failed update to create.
+    """
+    del db  # kept in the signature for the existing service call sites
+    settings = get_settings()
+    if not settings.dt_dispatch_base_id or not settings.dt_dispatch_table_id:
+        raise RuntimeError("AITable dispatch base_id/table_id is not configured")
+
+    if not wo.dt_create_eligible or wo.dt_record_id:
+        logger.info("Skipping non-eligible AITable write for %s", wo.pts_order_id)
         return
 
-    cells = _work_order_to_cells(wo)
+    if aitable_lookup is None:
+        aitable_lookup = await _build_dispatch_aitable_lookup()
 
-    if wo.dt_record_id:
-        # Update existing record
-        result = await dingtalk_client.update_records([{
-            "recordId": wo.dt_record_id,
-            "cells": cells,
-        }], base_id=settings.dt_dispatch_base_id, table_id=settings.dt_dispatch_table_id)
-        # Check if update actually succeeded (dws returns data dict with records on success)
-        if result is None or (isinstance(result, dict) and not result.get("data") and not result.get("updatedRecordIds")):
-            logger.warning("Update AITable record failed or record not found, will create new: %s", wo.dt_record_id)
-            # Treat as if record doesn't exist, create new instead
-            wo.dt_record_id = None
-        else:
-            wo.dt_sync_status = "synced"
-            wo.dt_synced_at = datetime.now(timezone.utc)
-            wo.dt_synced_month = sync_month or current_month()
-            return
-    else:
-        # Create new record
-        result = await dingtalk_client.create_records(
-            [{"cells": cells}],
-            base_id=settings.dt_dispatch_base_id,
-            table_id=settings.dt_dispatch_table_id,
+    matches = aitable_lookup.get(wo.pts_order_id, [])
+    if len(matches) > 1:
+        wo.dt_sync_status = "dedup_conflict"
+        logger.error(
+            "Refusing AITable write for %s: %d records share the same PTS link (%s)",
+            wo.pts_order_id,
+            len(matches),
+            ",".join(matches),
         )
-        if result is None:
-            logger.error("Failed to create AITable record for work order %s", wo.pts_order_id)
-            wo.dt_sync_status = "failed"
-            return
+        return
 
-        got_record_id = False
-        if isinstance(result, dict):
-            # dws returns {"newRecordIds": ["xxx"]}
-            new_ids = result.get("newRecordIds", [])
-            if new_ids:
-                wo.dt_record_id = new_ids[0]
-                got_record_id = True
-        elif isinstance(result, list) and len(result) > 0:
-            rid = result[0].get("recordId") or result[0].get("record_id")
-            if rid:
-                wo.dt_record_id = rid
-                got_record_id = True
+    if len(matches) == 1:
+        # The link is already present. Reuse the existing association, but do
+        # not update the DingTalk row as part of the new-record path.
+        wo.dt_record_id = matches[0]
+        wo.dt_create_eligible = False
+        wo.dt_sync_status = "synced"
+        wo.dt_synced_at = datetime.now(timezone.utc)
+        wo.dt_synced_month = sync_month or current_month()
+        logger.info(
+            "Dedup: reused existing AITable record %s for PTS order %s; no create/update",
+            matches[0],
+            wo.pts_order_id,
+        )
+        return
 
-        if not got_record_id:
-            logger.error("AITable create returned no record ID for work order %s, result=%s", wo.pts_order_id, str(result)[:200])
-            wo.dt_sync_status = "failed"
-            return
+    result = await dingtalk_client.create_records(
+        [{"cells": _work_order_to_cells(wo)}],
+        base_id=settings.dt_dispatch_base_id,
+        table_id=settings.dt_dispatch_table_id,
+    )
+    if result is None:
+        wo.dt_sync_status = "failed"
+        logger.error("Failed to create AITable record for work order %s", wo.pts_order_id)
+        return
 
+    got_record_id = False
+    if isinstance(result, dict):
+        new_ids = result.get("newRecordIds", [])
+        if isinstance(new_ids, list) and new_ids:
+            wo.dt_record_id = new_ids[0]
+            got_record_id = True
+    elif isinstance(result, list) and result:
+        rid = result[0].get("recordId") or result[0].get("record_id")
+        if rid:
+            wo.dt_record_id = rid
+            got_record_id = True
+
+    if not got_record_id:
+        wo.dt_sync_status = "failed"
+        logger.error(
+            "AITable create returned no record ID for work order %s, result=%s",
+            wo.pts_order_id,
+            str(result)[:200],
+        )
+        return
+
+    wo.dt_create_eligible = False
     wo.dt_sync_status = "synced"
     wo.dt_synced_at = datetime.now(timezone.utc)
     wo.dt_synced_month = sync_month or current_month()
+    aitable_lookup[wo.pts_order_id] = [wo.dt_record_id]
 
 
 
@@ -700,7 +811,6 @@ async def _update_pts_planned_completion(orders: list[WorkOrder]) -> tuple[int, 
 
 async def _update_aitable_planned_completion(db: Session, orders: list[WorkOrder]) -> tuple[int, int]:
     """Best-effort update of planned_completion in DAILY_SERVICE AITable table."""
-    import re
     from services.aitable_fields import DAILY_SERVICE
 
     settings = get_settings()
@@ -723,23 +833,14 @@ async def _update_aitable_planned_completion(db: Session, orders: list[WorkOrder
         logger.error("Failed to query DAILY_SERVICE AITable for planned_completion update: %s", e)
         return 0, len(adjusted_orders)
 
-    # Build lookup: pts_order_id → record_id
+    # Build lookup: pts_order_id → record_id (using shared helper)
     aitable_lookup: dict[str, str] = {}
     for record in records:
         cells = record.get("cells", {})
         link_val = cells.get(DAILY_SERVICE.get("巡检工单链接", ""))
-        url = None
-        if isinstance(link_val, dict):
-            url = link_val.get("link") or link_val.get("text", "")
-        elif isinstance(link_val, str) and link_val.startswith("http"):
-            url = link_val
-
-        if not url:
-            continue
-
-        match = re.search(r'/project/order/([^/?]+)', url)
-        if match:
-            aitable_lookup[match.group(1)] = record.get("recordId", "")
+        pts_id = extract_pts_order_id_from_link(link_val)
+        if pts_id:
+            aitable_lookup[pts_id] = record.get("recordId", "")
 
     field_id = DAILY_SERVICE.get("工单计划完成时间")
     if not field_id:
@@ -769,77 +870,6 @@ async def _update_aitable_planned_completion(db: Session, orders: list[WorkOrder
             failed += 1
 
     return updated, failed
-
-
-async def _update_closure_status_from_aitable(db: Session) -> None:
-    """Update closure_status for work orders based on AITable fields.
-
-    Reads 巡检是否完成 and 巡检报告 from 客户巡检派单 AITable records matched
-    via 巡检工单链接 → pts_order_id.
-
-    Only updates closure_status to "已闭环" if conditions are met.
-    Never overwrites an existing "已闭环" back to "未闭环".
-    """
-    import re
-    from services.aitable_fields import extract_select_name
-
-    settings = get_settings()
-    if not settings.dt_dispatch_base_id or not settings.dt_dispatch_table_id:
-        return
-
-    try:
-        records = await dingtalk_client.query_records(
-            limit=100,
-            base_id=settings.dt_dispatch_base_id,
-            table_id=settings.dt_dispatch_table_id,
-            fetch_all=True,
-        )
-    except Exception as e:
-        logger.error("Failed to query AITable for closure status update: %s", e)
-        return
-
-    # Build lookup: pts_order_id → (inspection_complete, has_report)
-    aitable_status: dict[str, tuple[bool, bool]] = {}
-    for record in records:
-        cells = record.get("cells", {})
-        link_val = cells.get(DISPATCH["巡检工单链接"])
-
-        # Extract pts_order_id from URL
-        url = None
-        if isinstance(link_val, dict):
-            url = link_val.get("link") or link_val.get("text", "")
-        elif isinstance(link_val, str) and link_val.startswith("http"):
-            url = link_val
-
-        if not url:
-            continue
-
-        match = re.search(r'/project/order/([^/?]+)', url)
-        if not match:
-            continue
-
-        pts_order_id = match.group(1)
-        inspection_complete = extract_select_name(cells.get(DISPATCH["巡检是否完成"]))
-        report_attachments = cells.get(DISPATCH["巡检报告"])
-
-        is_complete = inspection_complete and inspection_complete.strip() == "是"
-        has_report = isinstance(report_attachments, list) and len(report_attachments) > 0
-        aitable_status[pts_order_id] = (is_complete, has_report)
-
-    # Update local work orders
-    updated = 0
-    for wo in db.query(WorkOrder).all():
-        if wo.pts_order_id not in aitable_status:
-            continue
-        is_complete, has_report = aitable_status[wo.pts_order_id]
-        # Only upgrade to 已闭环; never downgrade
-        if is_complete and has_report and wo.closure_status != "已闭环":
-            wo.closure_status = "已闭环"
-            updated += 1
-
-    if updated:
-        db.commit()
-        logger.info("Updated closure_status for %d work orders from AITable", updated)
 
 
 def cleanup_stale_running_logs(db: Session) -> None:

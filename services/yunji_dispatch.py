@@ -77,7 +77,7 @@ DEPT_LEADER = {
 }
 
 DEFAULTS = {
-    "outsource_specialist": "徐丛然",
+    "outsource_specialist": "张珈铨",
     "designated_scenario": "产品售后",
     "outsource_method": "部分外包",
     "delivery_content": "产品巡检",
@@ -263,6 +263,14 @@ async def create_yunji_requirement(
         yunji_client.yunji_api("GET", "/api/admin/user/commissioner_list"),
         yunji_client.yunji_api("GET", "/api/admin/user/regional_manager_list"),
     )
+
+    # Validate critical API responses — yunji may return null data for non-existent CRM projects
+    if not isinstance(crm_project, dict):
+        raise RuntimeError(
+            f"云集未返回 CRM 项目信息（crmId={crm_project_id}），该项目可能未在云集注册"
+        )
+    if not isinstance(cart_item, dict) or not cart_item.get("id"):
+        raise RuntimeError("云集购物车创建失败，无法获取 cart item ID")
 
     project_name = crm_project.get("name", pts_info["project_name"])
     logger.info("项目: %s, 购物车ID: %s", project_name, cart_item.get("id"))

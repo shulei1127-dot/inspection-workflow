@@ -6,7 +6,7 @@ set -euo pipefail
 DB_URL="${DATABASE_URL}"
 # Alembic ini 需要 postgresql+psycopg:// 格式，去掉 +psycopg 用于纯 psycopg 驱动
 sed -i "s|^sqlalchemy.url = .*|sqlalchemy.url = ${DB_URL}|" alembic.ini
-echo "[entrypoint] Updated alembic.ini with DATABASE_URL=${DB_URL}"
+echo "[entrypoint] Updated alembic.ini with DATABASE_URL (value redacted)"
 
 # ── 等待 PostgreSQL 就绪 ──────────────────────────────────────────────
 echo "[entrypoint] Waiting for PostgreSQL..."

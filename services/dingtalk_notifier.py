@@ -1,4 +1,10 @@
-"""DingTalk robot notification service."""
+"""DingTalk robot notification service.
+
+Notification policy: "无事不报，有事必达"
+- Silent on routine "0 results" / "all normal" messages
+- Merge daily summaries into a single daily digest (sent ~17:30)
+- Always send immediately: errors, dispatch failures, cookie expiry, audit rejections
+"""
 
 import base64
 import datetime
@@ -13,6 +19,41 @@ import httpx
 from core.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# ── Daily digest cache (in-process, reset each day) ─────────────
+# Keyed by category; each entry is a dict with whatever the digest needs.
+# Populated by individual notify_* functions, consumed by notify_daily_digest().
+
+_digest_date: str = ""  # YYYY-MM-DD, tracks cache freshness
+_digest_data: dict[str, dict] = {}
+
+
+def _ensure_digest_cache() -> None:
+    """Reset the digest cache if the date has changed."""
+    global _digest_date, _digest_data
+    today = datetime.datetime.now(
+        datetime.timezone(datetime.timedelta(hours=8))
+    ).strftime("%Y-%m-%d")
+    if _digest_date != today:
+        _digest_date = today
+        _digest_data = {}
+
+
+def store_digest_entry(category: str, data: dict) -> None:
+    """Store data for the daily digest under a given category."""
+    _ensure_digest_cache()
+    existing = _digest_data.get(category, {})
+    existing.update(data)
+    _digest_data[category] = existing
+
+
+def get_digest_data() -> dict[str, dict]:
+    """Return the current day's digest data."""
+    _ensure_digest_cache()
+    return dict(_digest_data)
+
+
+# ── Workday check ────────────────────────────────────────────────
 
 
 def _is_workday_today() -> bool:
@@ -33,16 +74,11 @@ def _is_workday_today() -> bool:
         return today.weekday() < 5
 
 
+# ── Signature & send ─────────────────────────────────────────────
+
+
 def _generate_signature(secret: str, timestamp: int) -> str:
-    """Generate DingTalk signature with secret.
-
-    Args:
-        secret: DingTalk robot secret (SEC...)
-        timestamp: Unix timestamp in milliseconds
-
-    Returns:
-        URL-encoded signature string
-    """
+    """Generate DingTalk signature with secret."""
     string_to_sign = f"{timestamp}\n{secret}"
     hmac_code = hmac.new(
         secret.encode("utf-8"),
@@ -60,13 +96,7 @@ async def send_dingtalk_notification(
 ) -> bool:
     """Send text message to DingTalk robot.
 
-    Args:
-        title: Message title (bold in text)
-        content: Message content
-        webhook_url: Optional custom webhook URL (defaults to config)
-
-    Returns:
-        True if sent successfully, False otherwise
+    Returns True if sent successfully, False otherwise.
     """
     settings = get_settings()
 
@@ -113,66 +143,77 @@ async def send_dingtalk_notification(
         return False
 
 
+async def notify_closure_manual(
+    *,
+    pts_order_id: str,
+    customer_name: str,
+    pts_url: str,
+    claim_by: str,
+    current_stage: str,
+    creator_name: str,
+    assignee_id: str,
+    reason: str,
+) -> bool:
+    """Send a sanitized immediate alert for a persisted V2 manual state."""
+    return await send_dingtalk_notification(
+        "⚠️ 巡检工单需要人工推进阶段",
+        (
+            f"工单 [{pts_order_id}]({pts_url})（客户：{customer_name}）\n\n"
+            f"- 当前负责人：{claim_by}\n- 当前阶段：{current_stage}\n"
+            f"- 创建人：{creator_name}\n- 需要指定负责人：{assignee_id}\n"
+            f"- 目标阶段：审核工单\n- 原因：{reason[:500]}"
+        ),
+    )
+
+
+# ── Individual notification functions ─────────────────────────────
+# Policy: errors always send immediately; routine results go to digest cache.
+
+
 async def notify_sync_job(result: dict, error: str | None = None) -> bool:
-    """Send notification after sync job completes.
-
-    Args:
-        result: Result dict from run_sync {status, fetched_count, created_count, updated_count, new_orders}
-        error: Error message if failed
-
-    Returns:
-        True if sent successfully
-    """
+    """Sync job notification. Error → send immediately; success → digest cache."""
     if error:
-        title = "❌ PTS数据同步任务失败"
-        content = f"错误信息：{error}"
-    else:
-        status = result.get("status", "unknown")
-        fetched = result.get("fetched_count", 0)
-        created = result.get("created_count", 0)
-        updated = result.get("updated_count", 0)
+        return await send_dingtalk_notification(
+            "❌ PTS数据同步任务失败",
+            f"错误信息：{error}",
+        )
 
-        title = "✅ PTS数据同步任务完成"
-        content = f"- 拉取记录：{fetched} 条\n- 新建记录：{created} 条\n- 更新记录：{updated} 条\n\n状态：{status}"
+    fetched = result.get("fetched_count", 0)
+    created = result.get("created_count", 0)
+    updated = result.get("updated_count", 0)
 
-        # Add new order links if available
-        new_orders = result.get("new_orders", [])
-        if new_orders and created > 0:
-            content += "\n\n新建工单："
-            for order in new_orders[:5]:  # Show max 5 orders
-                pts_order_id = order.get("pts_order_id", "")
-                customer_name = order.get("customer_name", "")
-                content += f"\n- [{customer_name}](https://pts.chaitin.net/project/order/{pts_order_id})"
-            if len(new_orders) > 5:
-                content += f"\n- ... 还有 {len(new_orders) - 5} 条"
-
-    return await send_dingtalk_notification(title, content)
+    # Build digest entry
+    new_orders = result.get("new_orders", [])
+    new_names = [o.get("customer_name", "") for o in new_orders[:5]] if created > 0 else []
+    store_digest_entry("sync", {
+        "fetched": fetched,
+        "created": created,
+        "updated": updated,
+        "new_names": new_names,
+    })
+    return False  # Suppressed — will appear in daily digest
 
 
 async def notify_dispatch_monitor(result: dict, error: str | None = None) -> bool:
-    """Send notification after dispatch monitor poll completes.
-
-    Args:
-        result: Result dict from run_dispatch_monitor_poll {status, dispatch_triggered, dispatch_failed}
-        error: Error message if failed
-
-    Returns:
-        True if sent successfully
-    """
+    """Dispatch monitor notification. Error → send; 0 results → silent; else → digest cache."""
     if error:
-        title = "❌ 派单轮询任务失败"
-        content = f"错误信息：{error}"
-    else:
-        status = result.get("status", "unknown")
-        dispatched = result.get("dispatch_triggered", 0)
-        failed = result.get("dispatch_failed", 0)
+        return await send_dingtalk_notification(
+            "❌ 派单轮询任务失败",
+            f"错误信息：{error}",
+        )
 
-        title = "✅ 派单轮询任务完成"
-        content = f"""- 触发派单：{dispatched} 个
-- 派单失败：{failed} 个
+    dispatched = result.get("dispatch_triggered", 0)
+    failed = result.get("dispatch_failed", 0)
 
-状态：{status}"""
-    return await send_dingtalk_notification(title, content)
+    # Silent if nothing happened
+    if dispatched == 0 and failed == 0:
+        return False
+
+    store_digest_entry("dispatch_summary", {
+        "dispatched": dispatched,
+        "failed": failed,
+    })
+    return False  # Suppressed — will appear in daily digest
 
 
 async def notify_dispatch_success(
@@ -182,25 +223,15 @@ async def notify_dispatch_success(
     order_id: str,
     pts_url: str,
 ) -> bool:
-    """Send notification after a single dispatch success.
-
-    Args:
-        supplier: Supplier name
-        customer_name: Customer name
-        demand_id: Yunji demand ID
-        order_id: Yunji order ID
-        pts_url: PTS work order URL
-
-    Returns:
-        True if sent successfully
-    """
-    title = "🚀 派单成功"
-    content = f"""- 客户：{customer_name}
-- 供应商：{supplier}
-- 需求编号：{demand_id}
-- 订单编号：{order_id}
-- 工单链接：{pts_url}"""
-    return await send_dingtalk_notification(title, content)
+    """Per-dispatch success. Store in digest cache, do NOT send immediately."""
+    items = get_digest_data().get("dispatch_successes", {}).get("items", [])
+    items.append({
+        "customer": customer_name,
+        "supplier": supplier,
+        "pts_url": pts_url,
+    })
+    store_digest_entry("dispatch_successes", {"items": items})
+    return False  # Suppressed — will appear in daily digest
 
 
 async def notify_dispatch_failed(
@@ -208,113 +239,91 @@ async def notify_dispatch_failed(
     customer_name: str,
     error: str,
 ) -> bool:
-    """Send notification after a single dispatch failure.
+    """Per-dispatch failure. Send immediately AND store in digest cache."""
+    # Store for digest
+    items = get_digest_data().get("dispatch_failures", {}).get("items", [])
+    items.append({"customer": customer_name, "supplier": supplier, "error": error})
+    store_digest_entry("dispatch_failures", {"items": items})
 
-    Args:
-        supplier: Supplier name
-        customer_name: Customer name
-        error: Error message
-
-    Returns:
-        True if sent successfully
-    """
-    title = "❌ 派单失败"
-    content = f"""- 客户：{customer_name}
-- 供应商：{supplier}
-- 错误：{error}"""
-    return await send_dingtalk_notification(title, content)
+    # Send immediately — important alert
+    return await send_dingtalk_notification(
+        "❌ 派单失败",
+        f"- 客户：{customer_name}\n- 供应商：{supplier}\n- 错误：{error}",
+    )
 
 
 async def notify_email_probe(result: dict, error: str | None = None) -> bool:
-    """Send notification after email probe completes.
-
-    Args:
-        result: Result dict from get_email_pending {total, pending}
-        error: Error message if failed
-
-    Returns:
-        True if sent successfully
-    """
+    """Email probe notification. Error → send; 0 pending → silent; else → digest cache."""
     if error:
-        title = "❌ 邮件探测任务失败"
-        content = f"错误信息：{error}"
-    else:
-        total = result.get("total", 0)
+        return await send_dingtalk_notification(
+            "❌ 邮件探测任务失败",
+            f"错误信息：{error}",
+        )
 
-        title = "✅ 邮件探测任务完成"
-        content = f"- 待发邮件：{total} 条"
-    return await send_dingtalk_notification(title, content)
+    total = result.get("total", 0)
+
+    # Silent if nothing pending
+    if total == 0:
+        return False
+
+    store_digest_entry("email_probe", {"pending": total})
+    return False  # Suppressed — will appear in daily digest
 
 
 async def notify_closure_check(result: dict, error: str | None = None) -> bool:
-    """Send notification after closure check completes.
-
-    Args:
-        result: Result dict from run_closure_check {status, checked, closed, failed}
-        error: Error message if failed
-
-    Returns:
-        True if sent successfully
-    """
+    """Closure check notification. Error → send; else → digest cache."""
     if error:
-        title = "❌ 闭环检查任务失败"
-        content = f"错误信息：{error}"
-    else:
-        status = result.get("status", "unknown")
-        checked = result.get("checked", 0)
-        closed = result.get("closed", 0)
-        failed = result.get("failed", 0)
+        return await send_dingtalk_notification(
+            "❌ 闭环检查任务失败",
+            f"错误信息：{error}",
+        )
 
-        title = "✅ 闭环检查任务完成"
-        content = f"""- 检查工单：{checked} 条
-- 自动闭环：{closed} 条
-- 闭环失败：{failed} 条
+    checked = result.get("checked", 0)
+    closed = result.get("closed", result.get("completed", 0))
+    failed = result.get("failed", result.get("retryable_failed", 0))
+    manual = result.get("manual", 0)
+    synced = result.get("synced", 0)
+    recovered = result.get("recovered", 0)
 
-状态：{status}"""
-    return await send_dingtalk_notification(title, content)
+    store_digest_entry("closure", {
+        "checked": checked,
+        "closed": closed,
+        "failed": failed,
+        "manual": manual,
+        "synced": synced,
+        "recovered": recovered,
+    })
+    return False  # Suppressed — will appear in daily digest
 
 
 async def notify_yunji_keepalive(result: dict, error: str | None = None) -> bool:
-    """Send notification after yunji keepalive completes.
-
-    Args:
-        result: Result dict from keepalive_cookie {status}
-        error: Error message if failed
-
-    Returns:
-        True if sent successfully
-    """
+    """Yunji keepalive notification. Only send when cookie expired or error."""
     if error:
-        title = "❌ 云集保活任务失败"
-        content = f"错误信息：{error}"
-    else:
-        status = result.get("status", "unknown")
+        return await send_dingtalk_notification(
+            "❌ 云集保活任务失败",
+            f"错误信息：{error}",
+        )
 
-        if status == "expired":
-            title = "⚠️ 云集Session已过期"
-            content = f"""状态：{status}
+    status = result.get("status", "unknown")
 
-请尽快更新 YUNJI_SESSION_COOKIE 环境变量！"""
-        else:
-            title = "✅ 云集保活任务完成"
-            content = f"状态：{status}"
-    return await send_dingtalk_notification(title, content)
+    if status == "expired":
+        # Important alert — always send
+        return await send_dingtalk_notification(
+            "⚠️ 云集Session已过期",
+            f"状态：{status}\n\n请尽快更新 YUNJI_SESSION_COOKIE 环境变量！",
+        )
+
+    # Normal keepalive — silent
+    return False
 
 
 async def notify_email_pre_analysis(result: dict, error: str | None = None) -> bool:
-    """Send notification after email pre-analysis job completes.
-
-    Args:
-        result: Result dict from run_email_pre_analysis {scanned, new, success, failed, skipped}
-        error: Error message if failed
-
-    Returns:
-        True if sent successfully
-    """
+    """Email pre-analysis notification. Error → send; 0 scanned → silent; else → digest cache."""
     if error:
-        title = "❌ 邮件预分析任务失败"
-        content = f"错误信息：{error}"
-        return await send_dingtalk_notification(title, content)
+        return await send_dingtalk_notification(
+            "❌ 邮件预分析任务失败",
+            f"错误信息：{error}",
+        )
 
     scanned = result.get("scanned", 0)
     new = result.get("new", 0)
@@ -322,35 +331,27 @@ async def notify_email_pre_analysis(result: dict, error: str | None = None) -> b
     failed = result.get("failed", 0)
     skipped = result.get("skipped", 0)
 
-    title = "✅ 邮件预分析任务完成"
-
+    # Silent if nothing to analyze
     if scanned == 0:
-        content = "无待处理记录。"
-    elif failed == 0:
-        content = f"""- 扫描记录：{scanned} 条
-- 新分析：{new} 条
-- 成功：{success} 条
-- 跳过：{skipped} 条
+        return False
 
-✅ 全部成功"""
-    else:
-        content = f"""- 扫描记录：{scanned} 条
-- 新分析：{new} 条
-- 成功：{success} 条
-- 失败：{failed} 条
-- 跳过：{skipped} 条
-
-⚠️ 存在失败，请查看日志"""
-
-    return await send_dingtalk_notification(title, content)
+    store_digest_entry("email_pre_analysis", {
+        "scanned": scanned,
+        "new": new,
+        "success": success,
+        "failed": failed,
+        "skipped": skipped,
+    })
+    return False  # Suppressed — will appear in daily digest
 
 
 async def notify_review_pipeline(result: dict, error: str | None = None) -> bool:
-    """通知交付转售后审核流水线结果。"""
+    """Review pipeline notification. Error → send; else → digest cache."""
     if error:
-        title = "❌ 交付转售后审核失败"
-        content = f"错误信息：{error}"
-        return await send_dingtalk_notification(title, content)
+        return await send_dingtalk_notification(
+            "❌ 交付转售后审核失败",
+            f"错误信息：{error}",
+        )
 
     total = result.get("total", 0)
     passed = result.get("passed", 0)
@@ -358,71 +359,154 @@ async def notify_review_pipeline(result: dict, error: str | None = None) -> bool
     manual = result.get("manual", 0)
     errors = result.get("errors", 0)
 
-    title = "✅ 交付转售后审核完成"
-
-    if total == 0:
-        content = "当前无待审核项目。"
-    elif errors == 0:
-        content = f"""- 审核项目：{total} 个
-- 通过：{passed} 个
-- 拒绝：{rejected} 个
-- 转人工：{manual} 个
-
-✅ 全部完成"""
-    else:
-        content = f"""- 审核项目：{total} 个
-- 通过：{passed} 个
-- 拒绝：{rejected} 个
-- 转人工：{manual} 个
-- 失败：{errors} 个
-
-⚠️ 存在失败，请查看日志"""
-
-    return await send_dingtalk_notification(title, content)
+    store_digest_entry("review", {
+        "total": total,
+        "passed": passed,
+        "rejected": rejected,
+        "manual": manual,
+        "errors": errors,
+    })
+    return False  # Suppressed — will appear in daily digest
 
 
 async def notify_daily_change_summary(_result: dict, error: str | None = None) -> bool:
-    """Send notification only when daily change summary job fails.
-
-    On success, the detailed daily report is already pushed by
-    push_daily_summary() inside the service, so we only notify on error
-    to avoid sending duplicate messages.
-    """
+    """Daily change summary. Only notify on error (success report already pushed separately)."""
     if error:
-        title = "❌ 每日变更摘要任务失败"
-        content = f"错误信息：{error}"
-        return await send_dingtalk_notification(title, content)
+        return await send_dingtalk_notification(
+            "❌ 每日变更摘要任务失败",
+            f"错误信息：{error}",
+        )
     return False
 
 
 async def notify_visit_pipeline(result: dict, error: str | None = None) -> bool:
-    """通知交付转售后回访闭环流水线结果。"""
+    """Visit pipeline notification. Error → send; else → digest cache."""
     if error:
-        title = "❌ 交付转售后回访失败"
-        content = f"错误信息：{error}"
-        return await send_dingtalk_notification(title, content)
+        return await send_dingtalk_notification(
+            "❌ 交付转售后回访失败",
+            f"错误信息：{error}",
+        )
 
     total = result.get("total", 0)
     completed = result.get("completed", 0)
     failed = result.get("failed", 0)
     skipped = result.get("skipped", 0)
 
-    title = "✅ 交付转售后回访完成"
+    store_digest_entry("visit", {
+        "total": total,
+        "completed": completed,
+        "failed": failed,
+        "skipped": skipped,
+    })
+    return False  # Suppressed — will appear in daily digest
 
-    if total == 0:
-        content = "当前无需回访项目。"
-    elif failed == 0:
-        content = f"""- 待回访项目：{total} 个
-- 已完成：{completed} 个
-- 跳过：{skipped} 个
 
-✅ 全部完成"""
-    else:
-        content = f"""- 待回访项目：{total} 个
-- 已完成：{completed} 个
-- 失败：{failed} 个
-- 跳过：{skipped} 个
+# ── Daily digest ─────────────────────────────────────────────────
 
-⚠️ 存在失败，请查看日志"""
 
+async def notify_daily_digest() -> bool:
+    """Send a merged daily digest of all routine notifications.
+
+    Called by the daily_digest scheduler job (~17:30 on workdays).
+    If no data was collected, sends nothing.
+    """
+    data = get_digest_data()
+
+    # Nothing collected today — skip
+    if not data:
+        logger.info("Daily digest: no data collected, skipping")
+        return False
+
+    today = datetime.datetime.now(
+        datetime.timezone(datetime.timedelta(hours=8))
+    ).strftime("%m-%d")
+
+    sections: list[str] = []
+    alerts: list[str] = []
+
+    # ── Sync ──
+    sync = data.get("sync")
+    if sync:
+        line = f"🔄 同步：拉取 {sync['fetched']} 条，新建 {sync['created']} 条"
+        names = sync.get("new_names", [])
+        if names:
+            line += f"（{', '.join(names[:3])}{'等' if len(names) > 3 else ''}）"
+        sections.append(line)
+
+    # ── Dispatch ──
+    dispatch_successes = data.get("dispatch_successes", {}).get("items", [])
+    dispatch_failures = data.get("dispatch_failures", {}).get("items", [])
+    dispatch_summary = data.get("dispatch_summary", {})
+
+    if dispatch_successes or dispatch_summary:
+        count = len(dispatch_successes) or dispatch_summary.get("dispatched", 0)
+        line = f"📦 派单：成功 {count} 个"
+        if dispatch_successes:
+            names = [f"{d['customer']}→{d['supplier']}" for d in dispatch_successes[:3]]
+            line += f"（{', '.join(names)}{'等' if len(dispatch_successes) > 3 else ''}）"
+        sections.append(line)
+
+    if dispatch_failures:
+        for d in dispatch_failures:
+            alerts.append(f"派单失败：{d['customer']}→{d['supplier']}（{d['error']}）")
+
+    # ── Email ──
+    email = data.get("email_pre_analysis")
+    if email:
+        line = f"📧 邮件：预分析 {email['scanned']} 条，成功 {email['success']}"
+        if email["failed"] > 0:
+            line += f"，失败 {email['failed']}"
+            alerts.append(f"邮件预分析失败 {email['failed']} 条")
+        sections.append(line)
+
+    email_pending = data.get("email_probe", {}).get("pending", 0)
+    if email_pending > 0:
+        sections.append(f"📧 待发邮件：{email_pending} 条")
+
+    # ── Closure ──
+    closure = data.get("closure")
+    if closure and closure.get("checked", 0) > 0:
+        line = f"🔒 闭环：检查 {closure['checked']} 条，自动闭环 {closure['closed']} 条"
+        if closure.get("failed", 0) > 0:
+            line += f"，失败 {closure['failed']} 条"
+            alerts.append(f"闭环失败 {closure['failed']} 条")
+        if closure.get("manual", 0) > 0:
+            line += f"，需人工 {closure['manual']} 条"
+            alerts.append(f"闭环需人工处理 {closure['manual']} 条")
+        if closure.get("recovered", 0) > 0:
+            line += f"，恢复 {closure['recovered']} 条"
+        sections.append(line)
+
+    # ── Review ──
+    review = data.get("review")
+    if review and review.get("total", 0) > 0:
+        line = f"✅ 审核：{review['total']} 个项目，通过 {review['passed']}，拒绝 {review['rejected']}，转人工 {review['manual']}"
+        if review.get("errors", 0) > 0:
+            line += f"，失败 {review['errors']}"
+            alerts.append(f"审核失败 {review['errors']} 条")
+        sections.append(line)
+
+    # ── Visit ──
+    visit = data.get("visit")
+    if visit and visit.get("total", 0) > 0:
+        line = f"📞 回访：{visit['total']} 个项目，已完成 {visit['completed']}"
+        if visit.get("failed", 0) > 0:
+            line += f"，失败 {visit['failed']}"
+            alerts.append(f"回访失败 {visit['failed']} 条")
+        sections.append(line)
+
+    # Nothing actionable — skip
+    if not sections and not alerts:
+        logger.info("Daily digest: all sections empty, skipping")
+        return False
+
+    # Build message — each section separated by double newline for DingTalk markdown
+    content = "\n\n".join(sections)
+
+    if alerts:
+        content += "\n\n---\n\n⚠️ **需关注：**\n\n"
+        for a in alerts:
+            content += f"- {a}\n"
+
+    title = f"📋 巡检工作日报 ({today})"
     return await send_dingtalk_notification(title, content)

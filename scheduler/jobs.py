@@ -28,13 +28,14 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
     """Register all scheduled jobs."""
     settings = get_settings()
     registered_ids: list[str] = []
+    tz = settings.scheduler_timezone
 
     # Sync job: PTS → DingTalk
     sync_cron = settings.sync_cron.strip()
     if sync_cron:
         scheduler.add_job(
             _run_sync_job,
-            trigger=CronTrigger.from_crontab(sync_cron),
+            trigger=CronTrigger.from_crontab(sync_cron, timezone=tz),
             id="sync:pts-to-dingtalk",
             replace_existing=True,
             max_instances=1,
@@ -61,7 +62,7 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
     if email_probe_cron:
         scheduler.add_job(
             _run_email_probe_job,
-            trigger=CronTrigger.from_crontab(email_probe_cron),
+            trigger=CronTrigger.from_crontab(email_probe_cron, timezone=tz),
             id="monitor:email-probe",
             replace_existing=True,
             max_instances=1,
@@ -75,7 +76,7 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
     if closure_check_cron:
         scheduler.add_job(
             _run_closure_check_job,
-            trigger=CronTrigger.from_crontab(closure_check_cron),
+            trigger=CronTrigger.from_crontab(closure_check_cron, timezone=tz),
             id="monitor:closure-check",
             replace_existing=True,
             max_instances=1,
@@ -103,7 +104,7 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
         if pre_analysis_cron:
             scheduler.add_job(
                 _run_email_pre_analysis_job,
-                trigger=CronTrigger.from_crontab(pre_analysis_cron),
+                trigger=CronTrigger.from_crontab(pre_analysis_cron, timezone=tz),
                 id="monitor:email-pre-analysis",
                 replace_existing=True,
                 max_instances=1,
@@ -118,7 +119,7 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
         if review_cron:
             scheduler.add_job(
                 _run_review_pipeline_job,
-                trigger=CronTrigger.from_crontab(review_cron),
+                trigger=CronTrigger.from_crontab(review_cron, timezone=tz),
                 id="review:pipeline",
                 replace_existing=True,
                 max_instances=1,
@@ -133,7 +134,7 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
         if daily_summary_cron:
             scheduler.add_job(
                 _run_daily_change_summary_job,
-                trigger=CronTrigger.from_crontab(daily_summary_cron),
+                trigger=CronTrigger.from_crontab(daily_summary_cron, timezone=tz),
                 id="daily:change-summary",
                 replace_existing=True,
                 max_instances=1,
@@ -148,7 +149,7 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
         if visit_cron:
             scheduler.add_job(
                 _run_visit_pipeline_job,
-                trigger=CronTrigger.from_crontab(visit_cron),
+                trigger=CronTrigger.from_crontab(visit_cron, timezone=tz),
                 id="visit:pipeline",
                 replace_existing=True,
                 max_instances=1,
@@ -156,6 +157,21 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
             )
             registered_ids.append("visit:pipeline")
             logger.info("Registered visit pipeline job with cron: %s", visit_cron)
+
+    # Daily digest job
+    if settings.daily_digest_enabled:
+        digest_cron = settings.daily_digest_cron.strip()
+        if digest_cron:
+            scheduler.add_job(
+                _run_daily_digest_job,
+                trigger=CronTrigger.from_crontab(digest_cron, timezone=tz),
+                id="daily:digest",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
+            registered_ids.append("daily:digest")
+            logger.info("Registered daily digest job with cron: %s", digest_cron)
 
     return registered_ids
 
@@ -173,7 +189,7 @@ def _run_sync_job() -> None:
     result = None
 
     try:
-        from services.sync_service import run_sync, adjust_planned_completion_to_month_end
+        from services.sync_service import run_sync
 
         with SessionLocal() as db:
             sync_log = asyncio.run(run_sync(db, trigger_source="scheduler", push_to_aitable=True, only_new_for_month=True))
@@ -185,16 +201,8 @@ def _run_sync_job() -> None:
                 sync_log.updated_count,
             )
 
-            # Auto-adjust planned completion to month end
-            adjust_result = asyncio.run(adjust_planned_completion_to_month_end(db, month=sync_log.sync_month))
-            logger.info(
-                "Planned completion adjustment: adjusted=%d skipped=%d pts_updated=%d aitable_updated=%d",
-                adjust_result.get("adjusted", 0),
-                adjust_result.get("skipped", 0),
-                adjust_result.get("pts_updated", 0),
-                adjust_result.get("aitable_updated", 0),
-            )
-
+            # Planned-completion write-back is intentionally explicit; the
+            # normal sync must not mutate any existing AITable record.
             # Fetch newly created work orders from the same session
             new_orders = []
             if sync_log.started_at and sync_log.completed_at:
@@ -336,8 +344,8 @@ def _run_closure_check_job() -> None:
                     "Scheduled closure check completed: status=%s checked=%d closed=%d failed=%d",
                     result.get("status"),
                     result.get("checked", 0),
-                    result.get("closed", 0),
-                    result.get("failed", 0),
+                    result.get("completed", result.get("closed", 0)),
+                    result.get("retryable_failed", result.get("failed", 0)),
                 )
 
         _asyncio.run(_closure_check_workflow())
@@ -437,7 +445,7 @@ def _run_daily_change_summary_job() -> None:
 def _run_visit_pipeline_job() -> None:
     """Scheduled visit pipeline job runner (交付转售后回访闭环).
 
-    查找已通过审核但未完成回访的项目，逐个触发回访闭环。
+    从 AITable 查询满足条件的记录，批量执行回访闭环。
     """
     from services.dingtalk_notifier import notify_visit_pipeline
 
@@ -445,44 +453,16 @@ def _run_visit_pipeline_job() -> None:
     result = {}
 
     try:
-        from services.visit.visit_service import find_unvisited_approved_projects, run_visit_pipeline
+        from services.visit.visit_service import run_visit_batch
 
         with SessionLocal() as db:
-            projects = asyncio.run(find_unvisited_approved_projects(db))
-            total = len(projects)
-            completed = 0
-            failed = 0
-            skipped = 0
-
-            for proj in projects:
-                try:
-                    r = asyncio.run(run_visit_pipeline(
-                        db,
-                        project_id=proj["project_id"],
-                        project_name=proj.get("project_name"),
-                        customer_name=proj.get("customer_name"),
-                        region=proj.get("region"),
-                        trigger_source="scheduler",
-                    ))
-                    if r.get("status") in ("completed", "already_completed"):
-                        completed += 1
-                    elif r.get("status") == "skipped":
-                        skipped += 1
-                    else:
-                        failed += 1
-                except Exception as exc:
-                    failed += 1
-                    logger.warning("定时回访失败: project_id=%s, error=%s", proj["project_id"], exc)
-
-            result = {
-                "total": total,
-                "completed": completed,
-                "failed": failed,
-                "skipped": skipped,
-            }
+            result = asyncio.run(run_visit_batch(db, trigger_source="scheduler"))
             logger.info(
                 "Scheduled visit pipeline completed: total=%d completed=%d failed=%d skipped=%d",
-                total, completed, failed, skipped,
+                result.get("total", 0),
+                result.get("completed", 0),
+                result.get("failed", 0),
+                result.get("skipped", 0),
             )
     except Exception as e:
         error = str(e)
@@ -490,3 +470,18 @@ def _run_visit_pipeline_job() -> None:
 
     # Send DingTalk notification
     asyncio.run(notify_visit_pipeline(result, error))
+
+
+def _run_daily_digest_job() -> None:
+    """Scheduled daily digest job runner.
+
+    Merges all routine notifications collected during the day into
+    a single digest message. Runs on workdays after all other jobs.
+    """
+    from services.dingtalk_notifier import notify_daily_digest
+
+    try:
+        asyncio.run(notify_daily_digest())
+        logger.info("Daily digest job completed")
+    except Exception as e:
+        logger.exception("Daily digest job failed: %s", e)

@@ -198,7 +198,7 @@ def _sync_from_aitable(wo: WorkOrder, cells: dict) -> None:
             for u in engineer_val:
                 if not isinstance(u, dict):
                     continue
-                name = u.get("userId") or u.get("userName") or u.get("userRef", "")
+                name = u.get("userName") or u.get("userId") or u.get("userRef", "")
                 if name:
                     names.append(name)
             wo.engineer = ", ".join(names) if names else None
@@ -304,7 +304,7 @@ async def run_dispatch_monitor_poll(db: Session) -> dict:
             result = await dispatch_from_aitable(
                 db,
                 pts_url=pts_url,
-                supplier=supplier,
+                supplier=supplier or "",
                 record_id=record_id,
                 customer_name=customer_name,
             )
@@ -793,7 +793,19 @@ async def trigger_manual_email(db: Session, record_id: str, extra_emails: list[s
             msg = result.get("message", "邮件发送成功")
             if download_errors:
                 msg += f" (部分附件下载失败: {'; '.join(download_errors)})"
-            return {"status": "success", "message": msg}
+            closure = None
+            try:
+                from services.pts_closure_service import handle_email_success
+
+                closure = await handle_email_success(db, record_id, legacy_closure=False)
+            except Exception as exc:
+                # Email success remains successful; the scheduled V2 pass compensates closure.
+                logger.warning("Post-email closure callback failed for record %s: %s", record_id, exc)
+                closure = {"status": "retryable_failed", "message": str(exc)}
+            response = {"status": "success", "message": msg}
+            if closure:
+                response["closure"] = closure
+            return response
         else:
             return {"status": "failed", "message": result.get("message", "邮件发送失败")}
 

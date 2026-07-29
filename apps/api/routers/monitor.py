@@ -99,7 +99,7 @@ async def trigger_sync_closure_status(db: Session = Depends(get_db)):
 
 
 @router.post("/api/monitor/upload-report/{record_id}")
-async def upload_report_to_pts(record_id: str):
+async def upload_report_to_pts(record_id: str, db: Session = Depends(get_db)):
     """Manually upload inspection reports from AITable to PTS for a specific record.
 
     Downloads report attachments from AITable, uploads them to PTS via internal API,
@@ -148,6 +148,23 @@ async def upload_report_to_pts(record_id: str):
     if not pts_order_id:
         return {"success": False, "message": "未找到 PTS 工单链接，无法上传"}
 
+    if settings.inspection_closure_v2_enabled:
+        from services.inspection_closure_v2 import coordinate_record
+
+        result = await coordinate_record(
+            db,
+            target_record,
+            source="manual_upload",
+            reports_only=True,
+        )
+        return {
+            "success": result.get("status") in {"report_ready", "completed"},
+            "message": result.get("message") or result.get("status", "unknown"),
+            "pts_order_id": pts_order_id,
+            "customer_name": customer_name,
+            "closure": result,
+        }
+
     # 3. Download and upload reports
     file_ids = await pts_client.download_and_upload_reports(report_attachments)
 
@@ -159,23 +176,19 @@ async def upload_report_to_pts(record_id: str):
             "customer_name": customer_name,
         }
 
-    # 4. Add note with file IDs to PTS work order
-    attachment_names = []
-    for att in report_attachments:
-        if isinstance(att, dict):
-            name = att.get("filename", "")
-            if name:
-                attachment_names.append(name)
-
+    # 4. Add note with Markdown download links to PTS work order
+    # PTS web UI renders [filename](/f/{file_id}) as clickable download links.
     note_text = f"巡检报告已上传（{len(file_ids)}个附件）"
-    if attachment_names:
-        note_text += f"，附件: {', '.join(attachment_names)}"
+    for att, fid in zip(report_attachments, file_ids):
+        if isinstance(att, dict):
+            filename = att.get("filename", "巡检报告")
+            note_text += f"\n[{filename}](/f/{fid})"
 
     try:
         result = await pts_client.add_work_order_info(
             work_order_id=pts_order_id,
             note=note_text,
-            file_ids=file_ids,
+            file_ids=None,  # Markdown links in note text are the correct way for PTS web UI; file field doesn't render as clickable downloads
         )
         return {
             "success": True,

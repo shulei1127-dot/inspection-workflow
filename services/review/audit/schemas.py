@@ -108,6 +108,7 @@ class AuditResult(BaseModel):
     rules: list[RuleResult] = Field(default_factory=list)
     conclusion: AuditConclusion = ""
     value_added_service_reminder: str | None = None
+    manual_review_reason: str | None = None  # 转人工审核的原因
     audited_at: str = ""
     error: str | None = None
     assigner_username: str | None = None

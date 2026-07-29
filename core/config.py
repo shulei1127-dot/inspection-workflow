@@ -44,10 +44,25 @@ class Settings(BaseSettings):
     # Email tool (Streamlit)
     email_tool_port: int = 8502  # Streamlit 邮件工具端口
 
+    # Inspection closure V2 (disabled by default; legacy closure remains unchanged)
+    inspection_closure_v2_enabled: bool = False
+    inspection_closure_dry_run: bool = True
+    inspection_closure_report_upload_enabled: bool = False
+    inspection_closure_stage_advance_enabled: bool = False
+    inspection_closure_aitable_writeback_enabled: bool = False
+    inspection_closure_manual_notify_enabled: bool = False
+    dt_dispatch_report_link_uploaded_field_id: str = ""
+    inspection_closure_whitelist: str = ""  # comma-separated AITable record IDs
+    inspection_closure_default_assignee_id: str = "669723ae2f6e1a862a49ef16"
+    inspection_closure_upload_max_retries: int = 3
+    inspection_closure_stage_max_attempts: int = 10
+    inspection_closure_retry_backoff_seconds: float = 2.0
+    inspection_closure_retry_max_backoff_seconds: float = 30.0
+
     # Scheduler
     sync_cron: str = "0 16 * * *"
     email_probe_cron: str = "0 */2 * * *"  # 每2小时探测一次待发邮件数据
-    closure_check_cron: str = "0 10 * * *"  # 每天10点检测未闭环工单
+    closure_check_cron: str = "0 20 * * *"  # 每天20点检测未闭环工单（基于邮件是否发送触发）
     scheduler_enabled: bool = True
     scheduler_timezone: str = "Asia/Shanghai"
 
@@ -61,10 +76,10 @@ class Settings(BaseSettings):
     dingtalk_holiday_mute: bool = True  # 法定节假日及非工作日不发送钉钉通知
 
     # Review (交付转售后审核)
-    review_pipeline_enabled: bool = False  # 审核定时流水线总开关（默认关闭）
+    review_pipeline_enabled: bool = True  # 审核定时流水线总开关
     review_pipeline_cron: str = "0 16 * * *"  # 审核定时任务 cron
-    review_real_execution_enabled: bool = False  # 真实执行开关（采集+审核+写入）
-    review_writeback_enabled: bool = False  # 钉钉写入开关
+    review_real_execution_enabled: bool = True  # 真实执行开关（采集+审核+写入）
+    review_writeback_enabled: bool = True  # 钉钉写入开关
     pts_review_api_token: str = ""  # 审核 PTS API Token（空则回退到 pts_api_token）
     pts_review_approval_api_key: str = ""  # 审核通过/拒绝专用 API Key
     pts_review_after_sale_filter_ids: str = ""  # 按售后 PTS 用户 ID 过滤（逗号分隔）
@@ -83,6 +98,10 @@ class Settings(BaseSettings):
     visit_max_retries: int = 3  # 最大重试次数
     pts_visit_api_token: str = ""  # 回访专用 PTS Token（空则回退到 pts_review_api_token → pts_api_token）
     visit_default_satisfaction: int = 5  # 默认满意度评分 (1-5)
+
+    # Daily digest (日报汇总通知)
+    daily_digest_enabled: bool = True  # 日报总开关
+    daily_digest_cron: str = "30 17 * * 1-5"  # 工作日17:30发送
     visit_default_note: str = "自动回访完成"  # 默认回访备注
     visit_writeback_enabled: bool = False  # 钉钉写入开关（默认关闭）
     visit_writeback_aitable_base_id: str = ""  # 回访写入的 AITable base ID

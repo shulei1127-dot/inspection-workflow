@@ -53,14 +53,23 @@ async def trigger_review(db: Session = Depends(get_db)):
 
 
 @router.post("/api/review/audit/{project_id}", response_model=SingleAuditResponse)
-async def audit_single_project(project_id: str, db: Session = Depends(get_db)):
+async def audit_single_project(
+    project_id: str,
+    skip_rules: str | None = Query(None, description="跳过的规则ID，逗号分隔，如 1"),
+    db: Session = Depends(get_db),
+):
     """对单个待审核项目执行审核。"""
     import logging
     from services.review.review_service import audit_single_project as _audit, _save_audit_log
 
     logger = logging.getLogger(__name__)
 
-    result = await _audit(project_id)
+    # Parse skip_rules
+    skip_set: set[int] | None = None
+    if skip_rules:
+        skip_set = {int(s.strip()) for s in skip_rules.split(",") if s.strip().isdigit()}
+
+    result = await _audit(project_id, skip_rules=skip_set)
 
     # 保存审核日志
     try:

@@ -18,17 +18,27 @@ from services.review.audit.service_package import parse_service_packages
 from services.review.audit.product_type import extract_short_product_name
 
 
-def run_audit(input: AuditInput) -> AuditResult:
+def run_audit(input: AuditInput, *, skip_rules: set[int] | None = None) -> AuditResult:
+    """运行审核引擎。
+
+    Args:
+        input: 审核输入数据
+        skip_rules: 跳过的规则 ID 集合（如 {1} 表示跳过规则1门控）
+    """
+    skip_rules = skip_rules or set()
     rules: list[RuleResult] = []
 
     service_content = _build_service_content(input.delivery_items, input.product_details)
     period_summary = _build_after_sales_service_period_summary(input.product_details)
 
     # Rule 1 — gate rule
-    r1 = rule1_stage(input.delivery_stage, input.stage_status)
-    rules.append(r1)
-    if r1.result == "不通过":
-        return _build_result(input, rules, "不通过", None, service_content, period_summary)
+    if 1 not in skip_rules:
+        r1 = rule1_stage(input.delivery_stage, input.stage_status)
+        rules.append(r1)
+        if r1.result == "不通过":
+            return _build_result(input, rules, "不通过", None, service_content, period_summary)
+    else:
+        rules.append(RuleResult(rule_id=1, rule_name="交付阶段=转售后审核", result="跳过", message="已跳过规则1门控检查"))
 
     # Rules 2-8
     rules.append(rule2_leader(input.after_sales_leader))

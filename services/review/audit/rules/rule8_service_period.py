@@ -63,7 +63,7 @@ def _is_renewal_item(product_category: str) -> bool:
     return "续保" in (parts[-1] if parts else "")
 
 
-def _get_service_period_range(approval_date_str: str, total_months: int, deviation: int = 3) -> tuple[date, date]:
+def _get_service_period_range(approval_date_str: str, total_months: int, deviation: int = 6) -> tuple[date, date]:
     approval = _parse_date(approval_date_str)
     if approval is None:
         raise ValueError(f"Cannot parse approval date: {approval_date_str}")
@@ -74,7 +74,7 @@ def _get_service_period_range(approval_date_str: str, total_months: int, deviati
 
 
 def _get_service_period_range_from_activation(
-    after_sales_service_period: str, total_months: int, deviation: int = 3,
+    after_sales_service_period: str, total_months: int, deviation: int = 6,
 ) -> tuple[date, date]:
     """续保项目：以 after_sales_service_period 反推的激活日期作为起算点
 

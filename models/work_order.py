@@ -33,6 +33,7 @@ class WorkOrder(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # DingTalk sync tracking
     dt_record_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     dt_sync_status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False, index=True)
+    dt_create_eligible: Mapped[bool] = mapped_column(default=False, nullable=False, index=True)
     dt_synced_at: Mapped[datetime | None] = mapped_column(nullable=True)
     dt_synced_month: Mapped[str | None] = mapped_column(String(7), nullable=True, index=True)  # Format: YYYY-MM
 

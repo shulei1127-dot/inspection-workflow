@@ -106,20 +106,22 @@ async def sync_closure_status_from_pts(db: Session) -> dict:
     return result
 
 
-async def run_closure_check(db: Session) -> dict:
+async def _run_closure_check_v1(db: Session) -> dict:
     """Check and attempt auto-closure for all work orders.
 
-    Optimized flow:
+    Event-driven flow (triggered by AITable field changes):
     1. Fetch all AITable records from 客户巡检派单 table
-    2. Find records where 巡检是否完成='是' and 工单是否闭环!='是'
+    2. Find records where 邮件是否发送='是' and 巡检报告不为空 and 工单是否闭环!='是'
     3. For each record:
        - Check PTS work order status
        - If already closed in PTS, sync status to AITable
        - If not closed, attempt auto-closure (assign + note + advance stage)
        - Handle permission errors as "需人工处理"
     4. Update local database if work order exists
+    5. Recovery: detect local DB "已闭环" records where PTS is actually still open,
+       and reset them to "未闭环"
 
-    Returns stats: checked, synced (from PTS), closed, manual, failed, skipped
+    Returns stats: checked, synced (from PTS), closed, manual, failed, skipped, recovered
     """
     settings = get_settings()
     if not settings.dt_dispatch_base_id or not settings.dt_dispatch_table_id:
@@ -136,13 +138,16 @@ async def run_closure_check(db: Session) -> dict:
     logger.info("Closure check: %d AITable records fetched", len(records))
 
     # 2. Filter records that need processing
+    #    条件：邮件是否发送='是'（系统自动写回，可靠）+ 巡检报告不为空 + 工单是否闭环≠'是'
     to_process = []
     for record in records:
         cells = record.get("cells", {})
-        inspection_complete = extract_select_name(cells.get(DISPATCH["巡检是否完成"]))
+        email_sent = extract_select_name(cells.get(DISPATCH["邮件是否发送"]))
         closure_status = extract_select_name(cells.get(DISPATCH["工单是否闭环"]))
+        report_attachments = cells.get(DISPATCH["巡检报告"])
+        has_report = isinstance(report_attachments, list) and len(report_attachments) > 0
 
-        if inspection_complete == "是" and closure_status != "是":
+        if email_sent == "是" and closure_status != "是" and has_report:
             link_val = cells.get(DISPATCH["巡检工单链接"])
             pts_order_id = _extract_pts_order_id(link_val)
             if pts_order_id:
@@ -283,6 +288,43 @@ async def run_closure_check(db: Session) -> dict:
             logger.error("Error processing work order %s: %s", pts_order_id, e)
             failed_count += 1
 
+    # ── Recovery: detect and fix inconsistent local DB states ──
+    # Find work orders where local says "已闭环" but PTS says otherwise.
+    # This catches data corrupted by premature closure_status updates.
+    recovered_count = 0
+    processed_ids = {item["pts_order_id"] for item in to_process}
+
+    stale_orders = db.query(WorkOrder).filter(
+        WorkOrder.closure_status == "已闭环",
+    ).all()
+
+    for wo in stale_orders:
+        if not wo.pts_order_id or wo.pts_order_id.startswith("dt_"):
+            continue
+        if wo.pts_order_id in processed_ids:
+            # Already handled in the AITable loop above
+            continue
+
+        try:
+            pts_status = await pts_client.query_work_order_status(wo.pts_order_id)
+            if not pts_status:
+                continue
+
+            stage_name = (pts_status.get("current_stage") or {}).get("name", "")
+            is_finished = pts_status.get("is_finished", False)
+
+            if not (is_finished or stage_name in _CLOSURE_STAGE_NAMES):
+                # Local says "已闭环" but PTS says still open → reset
+                logger.warning(
+                    "Recovery: work order %s local=已闭环 but PTS stage=%s, resetting",
+                    wo.pts_order_id, stage_name,
+                )
+                wo.closure_status = "未闭环"
+                db.commit()
+                recovered_count += 1
+        except Exception as e:
+            logger.error("Recovery: failed to check PTS for %s: %s", wo.pts_order_id, e)
+
     result = {
         "status": "success",
         "checked": len(to_process),
@@ -291,14 +333,19 @@ async def run_closure_check(db: Session) -> dict:
         "manual": manual_count,
         "failed": failed_count,
         "skipped": skipped_count,
+        "recovered": recovered_count,
     }
     logger.info("Closure check completed: %s", result)
     return result
 
 
-# Stage name where the responsible person (负责人) must be assigned.
-# At this stage, only the work order creator can set the responsible person.
-_ASSIGN_RESPONSIBLE_STAGE = "指定工单负责人"
+async def run_closure_check(db: Session) -> dict:
+    """Dispatch to the isolated V2 coordinator only when explicitly enabled."""
+    if get_settings().inspection_closure_v2_enabled:
+        from services.inspection_closure_v2 import run_closure_check_v2
+
+        return await run_closure_check_v2(db)
+    return await _run_closure_check_v1(db)
 
 
 async def _close_single_work_order(
@@ -308,107 +355,178 @@ async def _close_single_work_order(
 ) -> str:
     """Close a single work order in PTS.
 
-    Steps:
-    0. Query PTS for creator and current stage → determine assignment strategy
-    1a. Creator is someone else + stage is "指定工单负责人" → manual
-    1b. Creator is someone else + stage is after "指定工单负责人"
-        → add 舒磊 as member, then assign (update_work_order_claim_by)
-    1c. Creator is 舒磊 → directly assign (update_work_order_claim_by)
-    2. Download inspection reports from AITable and upload to PTS
-    3. Add note to PTS work order (with file IDs if upload succeeded)
-    4. Advance stage via confirm_work_order_stage until reaching 审核工单
-    5. Log the trigger action
+    Three scenarios based on claim_by (工单负责人) and current stage:
+
+    场景1: claim_by是舒磊 → 添加舒磊到项目成员 + 推进到审核工单
+    场景2: claim_by是其他人，但阶段已到"开始处理工单"或之后
+           → 修改负责人为舒磊 + 添加舒磊到项目成员 + 推进到审核工单
+    场景3: claim_by是其他人，阶段还在"指定工单负责人"
+           → 添加舒磊到项目成员 + 钉钉通知用户(冯伟)去找创建人推进阶段
+           → 返回"manual"，等创建人指定负责人后再下次闭环检查处理
 
     Returns:
         "success" - 成功闭环
         "failed" - 失败
-        "manual" - 需要人工处理（权限错误等）
+        "manual" - 需要人工处理（场景3：钉钉通知已发）
     """
-    # ── Step 0: Query PTS for creator and current stage ──
+    # ── Step 0: Query PTS for claim_by, current stage, and existing info ──
+    claim_by_id = ""
+    claim_by_name = ""
     creator_id = ""
+    creator_name = ""
     stage_name = ""
     stage_sequence = 0
+    existing_info: list[dict] = []
     try:
-        pts_status = await pts_client.query_work_order_status(wo.pts_order_id)
+        query = """
+        {
+          workOrderByID(id: \"%s\") {
+            id
+            is_finished
+            current_stage { name sequence }
+            creator { id name username }
+            claim_by { id name username }
+            info { id note file { id filename } }
+          }
+        }
+        """ % wo.pts_order_id
+        result = await pts_client.pts_graphql_query(query)
+        pts_status = result.get("workOrderByID") if result else None
         if pts_status:
             creator = pts_status.get("creator") or {}
             creator_id = creator.get("id", "")
+            creator_name = creator.get("name", "")
+            claim_by = pts_status.get("claim_by") or {}
+            claim_by_id = claim_by.get("id", "")
+            claim_by_name = claim_by.get("name", "")
             current_stage = pts_status.get("current_stage") or {}
             stage_name = current_stage.get("name", "")
             stage_sequence = current_stage.get("sequence", 0)
+            existing_info = pts_status.get("info") or []
             logger.info(
-                "Work order %s: creator=%s, stage=%s (seq=%s)",
-                wo.pts_order_id, creator_id, stage_name, stage_sequence,
+                "Work order %s: creator=%s(%s), claim_by=%s(%s), stage=%s(seq=%s), info_count=%d",
+                wo.pts_order_id, creator_name, creator_id,
+                claim_by_name, claim_by_id,
+                stage_name, stage_sequence, len(existing_info),
             )
     except Exception as e:
         logger.warning("Failed to query PTS status for %s: %s", wo.pts_order_id, e)
-        # Fall through — will attempt best-effort assignment below
+        # Fall through — will attempt best-effort below
 
-    # ── Step 1: Assign work order to 舒磊 ──
-    is_creator_shulei = (creator_id == _DEFAULT_ASSIGNEE_ID)
-    is_assign_stage = (stage_name == _ASSIGN_RESPONSIBLE_STAGE)
+    # ── Dedup check: skip report upload if already uploaded ──
+    already_has_report = False
+    for info_entry in existing_info:
+        note = info_entry.get("note", "")
+        files = info_entry.get("file") or []
+        if "/f/" in note and ("巡检报告" in note or any(
+            f.get("filename", "").lower().endswith((".pdf", ".doc", ".docx"))
+            for f in files if isinstance(f, dict)
+        )):
+            already_has_report = True
+            break
+        if files and any(
+            f.get("filename", "").lower().endswith((".pdf", ".doc", ".docx"))
+            for f in files if isinstance(f, dict)
+        ):
+            already_has_report = True
+            break
 
-    if not is_creator_shulei and is_assign_stage:
-        # Case 1: Other creator + "指定工单负责人" stage → manual
-        # Only the creator can assign the responsible person at this stage.
-        reason = (
-            f"工单由他人（{creator_id}）创建且当前阶段为「{stage_name}」，"
-            f"仅创建者可设置负责人，需要人工处理"
-        )
-        logger.warning("Work order %s needs manual processing: %s", wo.pts_order_id, reason)
-        _log_trigger(db, wo, "closure_manual", reason)
-        return "manual"
-
-    if not is_creator_shulei:
-        # Case 2: Other creator + stage after "指定工单负责人"
-        # Add 舒磊 to the project first, then claim the work order.
+    if already_has_report and not pts_file_ids_needs_reupload(report_attachments, existing_info):
         logger.info(
-            "Work order %s created by %s (stage=%s), adding 舒磊 as member first",
-            wo.pts_order_id, creator_id, stage_name,
+            "Work order %s already has inspection report uploaded, skipping duplicate upload",
+            wo.pts_order_id,
+        )
+
+    # ── Step 1: Determine scenario and handle assignment ──
+    is_claim_by_shulei = (claim_by_id == _DEFAULT_ASSIGNEE_ID)
+    # "开始处理工单" is the stage after "指定工单负责人" (sequence >= 2)
+    _START_PROCESSING_STAGE = "开始处理工单"
+    is_at_or_after_start_processing = (
+        stage_sequence >= 2 or stage_name == _START_PROCESSING_STAGE
+        or stage_name in _CLOSURE_STAGE_NAMES
+    )
+
+    # ── Always add 舒磊 to project members first ──
+    logger.info("Adding 舒磊 to project members for work order %s", wo.pts_order_id)
+    try:
+        member_added = await pts_client.add_work_order_member(
+            wo.pts_order_id, _DEFAULT_ASSIGNEE_ID,
+        )
+        if member_added:
+            logger.info("Added 舒磊 as project member for work order %s", wo.pts_order_id)
+        else:
+            logger.info("add_work_order_member returned False for %s (may already be a member), continuing", wo.pts_order_id)
+    except Exception as e:
+        logger.warning("Failed to add 舒磊 as member for work order %s: %s", wo.pts_order_id, e)
+
+    if is_claim_by_shulei:
+        # ── 场景1: claim_by是舒磊 → 直接推进到审核工单 ──
+        logger.info("场景1: claim_by是舒磊, 推进工单 %s 到审核工单", wo.pts_order_id)
+
+    elif not is_claim_by_shulei and is_at_or_after_start_processing:
+        # ── 场景2: claim_by是其他人，阶段已到"开始处理工单"或之后
+        #    → 修改负责人为舒磊 + 推进到审核工单 ──
+        logger.info(
+            "场景2: claim_by=%s(%s), 阶段=%s(seq=%s), 修改负责人为舒磊并推进",
+            claim_by_name, claim_by_id, stage_name, stage_sequence,
         )
         try:
-            member_added = await pts_client.add_work_order_member(
-                wo.pts_order_id, _DEFAULT_ASSIGNEE_ID,
-            )
-            if member_added:
-                logger.info("Added 舒磊 as member of work order %s", wo.pts_order_id)
-            else:
-                # Member add may fail if already a member or API doesn't support it.
-                # Don't block — still try claim_by below.
-                logger.info(
-                    "add_work_order_member returned False for %s (may already be a member), continuing",
-                    wo.pts_order_id,
-                )
+            mutation = """
+            mutation {
+              update_work_order_claim_by(
+                id: "%s",
+                claim_by: "%s"
+              )
+            }
+            """ % (wo.pts_order_id, _DEFAULT_ASSIGNEE_ID)
+            result = await pts_client.pts_graphql_query(mutation)
+            assign_success = result.get("update_work_order_claim_by", False)
+            logger.info("Changed claim_by to 舒磊 for %s: success=%s", wo.pts_order_id, assign_success)
         except Exception as e:
-            logger.warning("Failed to add member to work order %s: %s", wo.pts_order_id, e)
-            # Don't block — still try claim_by below
+            error_msg = str(e)
+            logger.error("Failed to change claim_by for %s: %s", wo.pts_order_id, error_msg)
+            if "no permission" in error_msg or "需要设置负责人" in error_msg:
+                _log_trigger(db, wo, "closure_manual", f"无法修改负责人为舒磊: {error_msg}")
+                return "manual"
+            return "failed"
 
-    # Case 2 & 3: Claim the work order (Case 3: creator is 舒磊, direct assign)
-    assign_success = False
-    try:
-        mutation = """
-        mutation {
-          update_work_order_claim_by(
-            id: "%s",
-            claim_by: "%s"
-          )
-        }
-        """ % (wo.pts_order_id, _DEFAULT_ASSIGNEE_ID)
-        result = await pts_client.pts_graphql_query(mutation)
-        assign_success = result.get("update_work_order_claim_by", False)
-        logger.info("Assigned work order %s to 舒磊: success=%s", wo.pts_order_id, assign_success)
-    except Exception as e:
-        error_msg = str(e)
-        logger.warning("Failed to assign work order %s to 舒磊: %s", wo.pts_order_id, error_msg)
-        # If assignment fails with permission error and we're in case 2, try manual
-        if not is_creator_shulei and ("no permission" in error_msg or "需要设置负责人" in error_msg):
-            reason = f"无法将工单指派给舒磊: {error_msg}"
-            _log_trigger(db, wo, "closure_manual", reason)
-            return "manual"
+    else:
+        # ── 场景3: claim_by是其他人，阶段还在"指定工单负责人"
+        #    → 已添加项目成员 + 钉钉通知用户去找创建人推进阶段 ──
+        logger.info(
+            "场景3: claim_by=%s(%s), 阶段=%s, 需创建人(%s)指定负责人, 发钉钉通知",
+            claim_by_name, claim_by_id, stage_name, creator_name,
+        )
+        pts_url = f"https://pts.chaitin.net/project/order/{wo.pts_order_id}"
+        reason = (
+            f"工单负责人为{claim_by_name}，当前阶段还在「{stage_name}」，"
+            f"需要创建人{creator_name}指定负责人为舒磊后才能继续闭环"
+        )
+        _log_trigger(db, wo, "closure_manual", reason)
 
-    # ── Step 2: Download inspection reports from AITable and upload to PTS ──
+        # 发钉钉消息通知用户
+        try:
+            from services.dingtalk_notifier import send_dingtalk_notification
+            await send_dingtalk_notification(
+                title="⚠️ 巡检工单需要人工推进阶段",
+                content=(
+                    f"工单 [{wo.pts_order_id}]({pts_url})（客户：{wo.customer_name}）\n\n"
+                    f"- 工单负责人：{claim_by_name}\n"
+                    f"- 当前阶段：「{stage_name}」\n"
+                    f"- 创建人：{creator_name}\n\n"
+                    f"需要创建人 **{creator_name}** 指定负责人为舒磊，才能继续自动闭环。\n\n"
+                    f"已将舒磊添加到项目成员，请找 **{creator_name}** 推进工单阶段。"
+                ),
+            )
+            logger.info("DingTalk notification sent for work order %s (scenario 3)", wo.pts_order_id)
+        except Exception as e:
+            logger.warning("Failed to send DingTalk notification for work order %s: %s", wo.pts_order_id, e)
+
+        return "manual"
+
+    # ── Step 2: Upload inspection reports (skip if already uploaded) ──
     pts_file_ids: list[str] = []
-    if isinstance(report_attachments, list) and len(report_attachments) > 0:
+    if not already_has_report and isinstance(report_attachments, list) and len(report_attachments) > 0:
         try:
             pts_file_ids = await pts_client.download_and_upload_reports(report_attachments)
             if pts_file_ids:
@@ -422,42 +540,58 @@ async def _close_single_work_order(
             logger.error("Report upload failed for work order %s: %s", wo.pts_order_id, e)
 
     # ── Step 3: Add note to PTS work order ──
-    attachment_names = []
-    for att in report_attachments:
-        if isinstance(att, dict):
-            name = att.get("filename", "")
-            if name:
-                attachment_names.append(name)
-
+    # PTS web UI renders [filename](/f/{file_id}) as clickable download links.
     if pts_file_ids:
         note_text = f"巡检报告已上传（{len(pts_file_ids)}个附件）"
+        for att, fid in zip(report_attachments, pts_file_ids):
+            if isinstance(att, dict):
+                filename = att.get("filename", "巡检报告")
+                note_text += f"\n[{filename}](/f/{fid})"
+    elif already_has_report:
+        note_text = "自动闭环：巡检报告已在前次上传"
     else:
         note_text = "巡检报告已上传至钉钉文档"
-    if attachment_names:
-        note_text += f"，附件: {', '.join(attachment_names)}"
+        attachment_names = []
+        for att in report_attachments:
+            if isinstance(att, dict):
+                name = att.get("filename", "")
+                if name:
+                    attachment_names.append(name)
+        if attachment_names:
+            note_text += f"，附件: {', '.join(attachment_names)}"
 
     try:
         note_result = await pts_client.add_work_order_info(
             work_order_id=wo.pts_order_id,
             note=note_text,
-            file_ids=pts_file_ids if pts_file_ids else None,
+            file_ids=None,  # Markdown links in note text are the correct way for PTS web UI
         )
         logger.info("Added note to PTS work order %s: success=%s (file_ids=%s)", wo.pts_order_id, note_result, pts_file_ids)
     except Exception as e:
         logger.error("Failed to add note to PTS work order %s: %s", wo.pts_order_id, e)
 
     # ── Step 4: Advance stage until reaching "审核工单" ──
+    # Key insight: at the "指定工单负责人" stage, confirm_work_order_stage
+    # requires the claim_by parameter to set the responsible person.
+    # Without it, PTS returns "需要设置负责人" error.
+    # For subsequent stages, claim_by is not needed.
     success_count = 0
     target_reached = False
     needs_manual = False
     manual_reason = ""
+    # Pass claim_by on the first call if we're starting from "指定工单负责人"
+    claim_by_for_first_confirm = _DEFAULT_ASSIGNEE_ID if stage_name == "指定工单负责人" else None
 
     for attempt in range(_MAX_STAGE_CONFIRM_ATTEMPTS):
         try:
-            confirm_result = await pts_client.confirm_work_order_stage(wo.pts_order_id)
+            # Only pass claim_by on the first attempt if starting at "指定工单负责人"
+            claim_by_arg = claim_by_for_first_confirm if attempt == 0 else None
+            confirm_result = await pts_client.confirm_work_order_stage(
+                wo.pts_order_id, claim_by=claim_by_arg,
+            )
             logger.info(
-                "Stage confirm attempt %d for %s: result=%s",
-                attempt + 1, wo.pts_order_id, confirm_result,
+                "Stage confirm attempt %d for %s: result=%s (claim_by=%s)",
+                attempt + 1, wo.pts_order_id, confirm_result, claim_by_arg,
             )
 
             if confirm_result is True:
@@ -482,20 +616,19 @@ async def _close_single_work_order(
                         break
                 continue
             elif confirm_result is None or confirm_result is False:
-                if success_count > 0:
-                    pts_status = await pts_client.query_work_order_status(wo.pts_order_id)
-                    if pts_status:
-                        current_stage = pts_status.get("current_stage") or {}
-                        cur_stage_name = current_stage.get("name", "")
-                        if cur_stage_name in _CLOSURE_STAGE_NAMES:
-                            target_reached = True
-                            logger.info(
-                                "Work order %s in closure stage '%s' after %d attempts",
-                                wo.pts_order_id, cur_stage_name, success_count,
-                            )
+                pts_status = await pts_client.query_work_order_status(wo.pts_order_id)
+                if pts_status:
+                    current_stage = pts_status.get("current_stage") or {}
+                    cur_stage_name = current_stage.get("name", "")
+                    if cur_stage_name in _CLOSURE_STAGE_NAMES:
+                        target_reached = True
+                        logger.info(
+                            "Work order %s in closure stage '%s' (PTS returned %s but stage advanced, attempt %d)",
+                            wo.pts_order_id, cur_stage_name, confirm_result, attempt + 1,
+                        )
                 if not target_reached:
                     logger.warning(
-                        "Stage confirm returned %s for %s on attempt %d",
+                        "Stage confirm returned %s for %s on attempt %d, stage did not advance",
                         confirm_result, wo.pts_order_id, attempt + 1,
                     )
                 break
@@ -530,6 +663,79 @@ async def _close_single_work_order(
     return "success"
 
 
+def _extract_existing_report_filenames(existing_info: list[dict]) -> set[str]:
+    """Extract filenames of already-uploaded inspection reports from PTS info entries."""
+    filenames: set[str] = set()
+    for info_entry in existing_info:
+        files = info_entry.get("file") or []
+        for f in files:
+            if isinstance(f, dict):
+                fn = f.get("filename", "")
+                if fn:
+                    filenames.add(fn)
+        # Also extract filenames from Markdown links in notes [/f/...]
+        note = info_entry.get("note", "")
+        import re
+        for match in re.finditer(r'\[([^\]]+)\]\(/f/[^\)]+\)', note):
+            filenames.add(match.group(1))
+    return filenames
+
+
+def pts_file_ids_needs_reupload(
+    report_attachments: list[dict],
+    existing_info: list[dict],
+) -> bool:
+    """Check whether report attachments need to be re-uploaded.
+
+    Returns True if any attachment filename is not already present in the
+    PTS work order's info entries (meaning it hasn't been uploaded yet).
+    Returns False if all filenames already exist (no re-upload needed).
+    """
+    existing_filenames = _extract_existing_report_filenames(existing_info)
+    for att in report_attachments:
+        if isinstance(att, dict):
+            fn = att.get("filename", "")
+            if fn and fn not in existing_filenames:
+                return True
+    return False
+
+
+def recover_stalled_closure_wip(db: Session) -> int:
+    """Reset work orders stuck in '闭环中' back to '未闭环'.
+
+    A work order in '闭环中' for more than 10 minutes is considered stalled
+    (the process likely crashed or was restarted mid-closure). Reset it so
+    the next closure check can retry.
+
+    Called at app startup, alongside cleanup_stale_running_logs.
+
+    Returns the number of recovered work orders.
+    """
+    from datetime import timedelta
+
+    from models.work_order import WorkOrder
+
+    stale_threshold = datetime.now(timezone.utc) - timedelta(minutes=10)
+    stalled = db.query(WorkOrder).filter(
+        WorkOrder.closure_status == "闭环中",
+        WorkOrder.updated_at < stale_threshold,
+    ).all()
+
+    if not stalled:
+        return 0
+
+    for wo in stalled:
+        logger.warning(
+            "Recovering stalled work order %s (%s): '闭环中' for >10min, resetting to '未闭环'",
+            wo.pts_order_id, wo.customer_name,
+        )
+        wo.closure_status = "未闭环"
+
+    db.commit()
+    logger.warning("Recovered %d stalled '闭环中' work orders", len(stalled))
+    return len(stalled)
+
+
 def _extract_pts_order_id(link_val) -> str | None:
     """Extract PTS order ID from AITable URL field.
 
@@ -549,10 +755,18 @@ def _extract_pts_order_id(link_val) -> str | None:
 
 
 def _log_trigger(db: Session, wo: WorkOrder, trigger_type: str, reason: str) -> None:
-    """Log a trigger action for the work order closure."""
+    """Log a trigger action for the work order closure.
+
+    If the WorkOrder is a temporary object not persisted in the database
+    (e.g., created ad-hoc in run_closure_check for an AITable-only record),
+    write the trigger log with work_order_id=None to avoid FK violations.
+    """
+    from sqlalchemy.orm import object_session
+
+    in_session = object_session(wo) is not None
     log = TriggerLog(
         id=uuid.uuid4(),
-        work_order_id=wo.id,
+        work_order_id=wo.id if in_session else None,
         trigger_type=trigger_type,
         trigger_reason=reason,
         status="success" if "success" in trigger_type else "failed",
@@ -582,7 +796,22 @@ async def close_work_order_after_email(
         return {"success": False, "message": f"未找到 AITable 记录 {record_id} 对应的工单"}
 
     if wo.closure_status == "已闭环":
-        return {"success": True, "message": f"工单 {wo.pts_order_id} 已是已闭环状态，跳过"}
+        # Verify against PTS — local status may be stale
+        try:
+            pts_status = await pts_client.query_work_order_status(wo.pts_order_id)
+            if pts_status:
+                stage_name = (pts_status.get("current_stage") or {}).get("name", "")
+                if pts_status.get("is_finished") or stage_name in _CLOSURE_STAGE_NAMES:
+                    return {"success": True, "message": f"工单 {wo.pts_order_id} 已在PTS闭环，跳过"}
+                else:
+                    logger.warning(
+                        "Work order %s: local says 已闭环 but PTS stage=%s, resetting and proceeding",
+                        wo.pts_order_id, stage_name,
+                    )
+                    wo.closure_status = "未闭环"
+                    db.commit()
+        except Exception as e:
+            logger.warning("Failed to verify PTS status for %s, proceeding with closure: %s", wo.pts_order_id, e)
 
     # 2. Fetch AITable record to get report attachments
     settings = get_settings()
@@ -666,3 +895,25 @@ async def close_work_order_after_email(
         pass
 
     return {"success": True, "message": f"工单 {wo.pts_order_id} 已闭环"}
+
+
+async def handle_email_success(
+    db: Session,
+    record_id: str,
+    *,
+    legacy_closure: bool = True,
+) -> dict:
+    """Run the configured post-email closure policy.
+
+    Existing email-tool paths retain their V1 behavior when V2 is disabled;
+    callers that historically did not close (such as monitor manual email)
+    can pass ``legacy_closure=False`` and gain only the opt-in V2 behavior.
+    """
+    settings = get_settings()
+    if settings.inspection_closure_v2_enabled:
+        from services.inspection_closure_v2 import coordinate_after_email_success
+
+        return await coordinate_after_email_success(db, record_id)
+    if legacy_closure:
+        return await close_work_order_after_email(db, record_id)
+    return {"success": True, "status": "skipped", "message": "旧版入口未配置闭环"}

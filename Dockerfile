@@ -1,5 +1,9 @@
 FROM python:3.12-slim-trixie
 
+# 设置时区为北京时间
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && echo "Asia/Shanghai" > /etc/timezone
+
 # 系统依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \

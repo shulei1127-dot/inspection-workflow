@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from core.config import get_settings
 from models.review_audit_log import ReviewAuditLog
 from services.review.audit.engine import run_audit
-from services.review.audit.product_type import is_key_product
+from services.review.audit.product_type import is_key_product, extract_short_product_name
 from services.review.audit.schemas import AuditInput, AuditResult
 from services.review.extractors.review_approval_time import extract_approval_time
 from services.review.extractors.review_main_page import extract_project_data
@@ -129,8 +129,13 @@ async def run_review_pipeline(
     return {"status": "success", **summary, "results": results}
 
 
-async def audit_single_project(project_id: str) -> dict[str, Any]:
-    """对单个项目执行完整审核流程。"""
+async def audit_single_project(project_id: str, *, skip_rules: set[int] | None = None) -> dict[str, Any]:
+    """对单个项目执行完整审核流程。
+
+    Args:
+        project_id: PTS 项目 ID
+        skip_rules: 跳过的规则 ID 集合（如 {1} 跳过规则1门控）
+    """
     # 前置检查
     settings = get_settings()
     if not settings.review_real_execution_enabled:
@@ -203,7 +208,7 @@ async def audit_single_project(project_id: str) -> dict[str, Any]:
         partner_delivery_type=project_data.partner_delivery_type,
     )
 
-    audit_result = run_audit(audit_input)
+    audit_result = run_audit(audit_input, skip_rules=skip_rules)
 
     # Step 3: 计算区域/交付类型/项目类型
     try:
@@ -219,6 +224,9 @@ async def audit_single_project(project_id: str) -> dict[str, Any]:
     has_key_product = any(is_key_product(p) for p in product_details)
     if not has_key_product and audit_result.conclusion == "通过":
         audit_result.conclusion = "转人工审核"
+        product_names = {extract_short_product_name(p.product_category or "") for p in product_details}
+        if product_names:
+            audit_result.manual_review_reason = "非关键产品（" + "、".join(sorted(product_names)) + "），需人工确认"
 
     # Step 5: 钉钉写入
     settings = get_settings()
@@ -232,12 +240,13 @@ async def audit_single_project(project_id: str) -> dict[str, Any]:
     else:
         dingtalk_result = {"enabled": False}
 
-    # Step 6: PTS 回写
+    # Step 6: PTS 回写（仅通过时自动回写，拒绝的项目需人工审核后手动操作）
     pts_review_result: dict[str, Any] | None = None
-    if audit_result.conclusion in ("通过", "不通过"):
-        approved = audit_result.conclusion == "通过"
+    if audit_result.conclusion == "通过":
         reason = _build_pts_review_reason(audit_result)
-        pts_review_result = await submit_review(project_id, approved, reason)
+        pts_review_result = await submit_review(project_id, True, reason)
+    elif audit_result.conclusion == "不通过":
+        pts_review_result = {"skipped": True, "reason": "拒绝项目需人工审核后手动操作"}
 
     return {
         "project_id": project_id,
