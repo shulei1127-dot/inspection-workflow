@@ -65,6 +65,11 @@ def _schema_fields(schema: dict | None) -> list[dict]:
         fields = data.get("fields") or data.get("fieldList")
         if isinstance(fields, list):
             return [field for field in fields if isinstance(field, dict)]
+        tables = data.get("tables")
+        if isinstance(tables, list):
+            for table in tables:
+                if isinstance(table, dict) and isinstance(table.get("fields"), list):
+                    return [field for field in table["fields"] if isinstance(field, dict)]
         table = data.get("table")
         if isinstance(table, dict) and isinstance(table.get("fields"), list):
             return [field for field in table["fields"] if isinstance(field, dict)]
@@ -75,6 +80,8 @@ def _field_options(field: dict) -> set[str]:
     raw = field.get("options")
     if raw is None and isinstance(field.get("property"), dict):
         raw = field["property"].get("options")
+    if raw is None and isinstance(field.get("config"), dict):
+        raw = field["config"].get("options")
     if isinstance(raw, dict):
         raw = raw.get("options") or raw.get("choices") or raw.get("items")
     if not isinstance(raw, list):
@@ -112,6 +119,25 @@ async def validate_v2_configuration(settings=None) -> None:
     if field_type and field_type not in {"singleselect", "single_select", "select"}:
         raise V2ConfigurationError(f"AITable 字段类型不支持: {field_type}")
     options = _field_options(field)
+    if not options:
+        detail_schema = await dingtalk_client.get_field(
+            settings.dt_dispatch_base_id,
+            settings.dt_dispatch_table_id,
+            field_ids=field_id,
+        )
+        detail = next(
+            (
+                item for item in _schema_fields(detail_schema)
+                if str(item.get("id") or item.get("fieldId") or item.get("field_id") or "") == field_id
+            ),
+            None,
+        )
+        if detail:
+            field = {**field, **detail}
+            field_type = str(field.get("type") or field.get("fieldType") or "").lower()
+            options = _field_options(field)
+    if field_type and field_type not in {"singleselect", "single_select", "select"}:
+        raise V2ConfigurationError(f"AITable 字段类型不支持: {field_type}")
     if not options or not {"是", "否"}.issubset(options):
         raise V2ConfigurationError("无法确认 Markdown链接报告字段的“是/否”选项")
 

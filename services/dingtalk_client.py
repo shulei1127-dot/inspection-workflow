@@ -101,6 +101,23 @@ async def get_table(base_id: str, table_id: str) -> dict | None:
     ])
 
 
+async def get_field(
+    base_id: str,
+    table_id: str,
+    field_ids: str | None = None,
+) -> dict | None:
+    """Get detailed field metadata, including single-select options."""
+    args = [
+        "aitable", "field", "get",
+        "--base-id", base_id,
+        "--table-id", table_id,
+    ]
+    if field_ids:
+        args.extend(["--field-ids", field_ids])
+    args.extend(["-f", "json"])
+    return await _run_dws(args)
+
+
 async def query_records(
     limit: int = 100,
     base_id: str | None = None,
