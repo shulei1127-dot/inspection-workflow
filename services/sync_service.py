@@ -8,10 +8,12 @@ Core flow:
 """
 
 import asyncio
+import calendar
 import logging
+import re
 import uuid
 from datetime import date, datetime, timezone
-import calendar
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -19,8 +21,15 @@ from sqlalchemy.orm import Session
 from core.config import get_settings
 from models.sync_log import SyncLog
 from models.work_order import WorkOrder
+from models.work_order_sync import WorkOrderSync
 from services import dingtalk_client, pts_client
-from services.aitable_fields import DISPATCH, COMPLETION_STAGES, current_month, extract_pts_order_id_from_link
+from services.aitable_fields import (
+    DISPATCH,
+    COMPLETION_STAGES,
+    current_month,
+    extract_pts_order_id_from_link,
+    extract_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,19 +54,17 @@ async def run_sync(
     push_to_aitable: bool = False,
     only_new_for_month: bool = False,
 ) -> SyncLog:
-    """Run the PTS → DingTalk sync pipeline.
+    """Run the PTS → local DB → AITable pipeline for one target month.
 
-    Args:
-        push_to_aitable: If False, only pull PTS data to local DB without
-                         pushing to DingTalk AITable. User can push later.
-        only_new_for_month: If True, only push work orders that have never been
-                            pushed to AITable (dt_synced_month is None or not
-                            equal to sync_month). This prevents re-pushing
-                            orders that were already synced in a previous run.
+    ``WorkOrder`` remains unique by PTS ID, while ``WorkOrderSync`` owns the
+    monthly AITable association.  This lets a delayed PTS order create a new
+    AITable record in a later month without losing its historical records.
     """
     from apps.api.routers.ws import broadcaster
 
     sync_month = sync_month or current_month()
+    if only_new_for_month:
+        logger.debug("Monthly association mode supersedes legacy only_new_for_month")
     log = SyncLog(
         id=uuid.uuid4(),
         trigger_source=trigger_source,
@@ -74,40 +81,37 @@ async def run_sync(
     })
 
     try:
-        # 1. Fetch from PTS
         raw_orders = await pts_client.query_inspection_work_orders(sync_month)
         log.fetched_count = len(raw_orders)
         logger.info("PTS fetched %d work orders for %s", len(raw_orders), sync_month)
 
-        # 2. Dedup and upsert local DB
         created_count = 0
         updated_count = 0
         skipped_count = 0
-        pending_records = []  # Records to sync to AITable
+        pending_records: list[tuple[WorkOrder, WorkOrderSync]] = []
 
         for raw in raw_orders:
             pts_order_id = str(raw.get("id", ""))
             if not pts_order_id:
                 continue
 
-            existing = db.query(WorkOrder).filter(WorkOrder.pts_order_id == pts_order_id).first()
+            existing = db.query(WorkOrder).filter(
+                WorkOrder.pts_order_id == pts_order_id,
+            ).first()
             is_completed = _is_completion_stage(raw)
 
-            # Completion stage:保留工单记录，更新状态，不再同步到AITable
             if is_completed:
                 if existing:
-                    # 更新状态信息
                     if _data_changed(existing, raw):
                         _update_work_order(existing, raw)
                         updated_count += 1
                     else:
                         skipped_count += 1
                 else:
-                    # 即使是完成阶段，也创建记录以便追溯
                     wo = WorkOrder(
                         id=uuid.uuid4(),
                         pts_order_id=pts_order_id,
-                        dt_sync_status="synced",  # 标记为已同步，不再推送到AITable
+                        dt_sync_status="local_only",
                         dt_create_eligible=False,
                         closure_status="已闭环",
                         **_extract_fields(raw),
@@ -115,30 +119,15 @@ async def run_sync(
                     wo.raw_data = raw
                     db.add(wo)
                     created_count += 1
-                # 完成阶段工单不加入 pending_records，不再推送到AITable
                 continue
 
             if existing:
-                changed = _data_changed(existing, raw)
-                if changed:
+                if _data_changed(existing, raw):
                     _update_work_order(existing, raw)
                     updated_count += 1
-
-                # Existing local work orders are local-only. The sole exception
-                # is a record explicitly marked as a new AITable candidate that
-                # has not been pushed yet; that candidate may be retried with
-                # the latest PTS fields.
-                if (
-                    existing.dt_create_eligible
-                    and not existing.dt_record_id
-                    and existing.dt_sync_status != "synced"
-                ):
-                    pending_records.append(existing)
-                elif changed:
-                    existing.dt_create_eligible = False
-                    existing.dt_sync_status = "local_only"
                 else:
                     skipped_count += 1
+                wo = existing
             else:
                 wo = WorkOrder(
                     id=uuid.uuid4(),
@@ -150,47 +139,47 @@ async def run_sync(
                 wo.raw_data = raw
                 db.add(wo)
                 created_count += 1
-                pending_records.append(wo)
+
+            # The association is keyed by (PTS ID, target month), not by the
+            # WorkOrder's legacy single-record columns.
+            association = _prepare_monthly_candidate(db, wo, sync_month)
+            if association is not None and association.create_eligible:
+                pending_records.append((wo, association))
 
         db.commit()
 
-        # 3. Push to DingTalk AITable (only if push_to_aitable=True)
-        if push_to_aitable:
-            records_to_push = [
-                wo for wo in pending_records
-                if wo.dt_create_eligible and not wo.dt_record_id
-            ]
-            if only_new_for_month:
-                logger.info(
-                    "only_new_for_month enabled: %d eligible records remain for month %s",
-                    len(records_to_push),
-                    sync_month,
-                )
-
-            if records_to_push:
-                # Serialize the full query → dedup → write window.
-                _acquire_dispatch_write_lock(db)
-                # Build a strict dedup lookup before any create operation.
-                aitable_lookup = await _build_dispatch_aitable_lookup()
-                for wo in records_to_push:
-                    try:
-                        await _sync_to_aitable(
-                            db,
-                            wo,
-                            sync_month=sync_month,
-                            aitable_lookup=aitable_lookup,
-                        )
-                    except Exception as e:
-                        logger.error("Failed to sync work order %s to AITable: %s", wo.pts_order_id, e)
-                        wo.dt_sync_status = "failed"
-                db.commit()
-
+        if push_to_aitable and pending_records:
+            _acquire_dispatch_write_lock(db)
+            aitable_lookup = await _build_dispatch_aitable_lookup()
+            for wo, association in pending_records:
+                try:
+                    await _sync_to_aitable(
+                        db,
+                        wo,
+                        sync_month=sync_month,
+                        aitable_lookup=aitable_lookup,
+                        sync_association=association,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to sync work order %s/%s to AITable: %s",
+                        wo.pts_order_id,
+                        sync_month,
+                        e,
+                    )
+                    wo.dt_sync_status = "failed"
+                    association.sync_status = "failed"
+                    association.error_message = str(e)[:2000]
+            db.commit()
 
         log.created_count = created_count
         log.updated_count = updated_count
         log.skipped_count = skipped_count
         log.status = "success"
-        if push_to_aitable and any(wo.dt_sync_status == "failed" for wo in pending_records):
+        if push_to_aitable and any(
+            association.sync_status == "failed"
+            for _, association in pending_records
+        ):
             log.status = "partial"
         if not push_to_aitable:
             log.status = "fetched_only"
@@ -206,8 +195,6 @@ async def run_sync(
             db.commit()
         except Exception:
             logger.exception("Failed to commit sync log final status")
-            # If commit fails, the log stays "running" in DB.
-            # Try to mark it with a fresh session as a last resort.
             try:
                 from core.db import SessionLocal as _SL
                 with _SL() as _db2:
@@ -221,7 +208,6 @@ async def run_sync(
             except Exception:
                 logger.exception("Also failed to update sync log via fresh session")
 
-    # Mark any stale "running" logs as failed (e.g. from crashed previous runs)
     cleanup_stale_running_logs(db)
 
     await broadcaster.broadcast("sync.completed", {
@@ -236,32 +222,39 @@ async def run_sync(
 
 
 async def push_to_aitable(db: Session, *, sync_month: str | None = None) -> dict:
-    """Push all pending (not yet synced) work orders to DingTalk AITable."""
+    """Push eligible monthly associations to DingTalk AITable."""
     from apps.api.routers.ws import broadcaster
 
     sync_month = sync_month or current_month()
-    q = db.query(WorkOrder).filter(
+    parts = sync_month.split("-")
+    year, month = int(parts[0]), int(parts[1])
+    last_day = calendar.monthrange(year, month)[1]
+    start_date = date(year, month, 1)
+    end_date = date(year, month, last_day)
+
+    orders = db.query(WorkOrder).filter(
+        WorkOrder.planned_completion >= start_date,
+        WorkOrder.planned_completion <= end_date,
         WorkOrder.dt_create_eligible.is_(True),
-        WorkOrder.dt_record_id.is_(None),
-        WorkOrder.dt_sync_status != "synced",
-    )
+    ).all()
+    pending_records: list[tuple[WorkOrder, WorkOrderSync]] = []
+    for wo in orders:
+        association = _prepare_monthly_candidate(db, wo, sync_month)
+        if association is not None and association.create_eligible:
+            pending_records.append((wo, association))
+    db.commit()
 
-    if sync_month:
-        parts = sync_month.split("-")
-        year, m = int(parts[0]), int(parts[1])
-        last_day = calendar.monthrange(year, m)[1]
-        start_date = date(year, m, 1)
-        end_date = date(year, m, last_day)
-        q = q.filter(
-            WorkOrder.planned_completion >= start_date,
-            WorkOrder.planned_completion <= end_date,
-        )
+    if not pending_records:
+        result = {
+            "status": "success",
+            "sync_month": sync_month,
+            "pushed": 0,
+            "failed": 0,
+            "total": 0,
+        }
+        await broadcaster.broadcast("sync.pushed", result)
+        return result
 
-    pending_records = q.all()
-    pushed = 0
-    failed = 0
-
-    # AITable must be queried successfully before any create operation.
     try:
         _acquire_dispatch_write_lock(db)
         aitable_lookup = await _build_dispatch_aitable_lookup()
@@ -276,17 +269,29 @@ async def push_to_aitable(db: Session, *, sync_month: str | None = None) -> dict
             "message": "AITable 去重查询失败，已中止推送以防止重复记录",
         }
 
-    for wo in pending_records:
+    pushed = 0
+    failed = 0
+    for wo, association in pending_records:
         try:
-            await _sync_to_aitable(db, wo, aitable_lookup=aitable_lookup)
-            pushed += 1
+            await _sync_to_aitable(
+                db,
+                wo,
+                sync_month=sync_month,
+                aitable_lookup=aitable_lookup,
+                sync_association=association,
+            )
+            if association.sync_status == "synced":
+                pushed += 1
+            else:
+                failed += 1
         except Exception as e:
             logger.error("Failed to push work order %s to AITable: %s", wo.pts_order_id, e)
             wo.dt_sync_status = "failed"
+            association.sync_status = "failed"
+            association.error_message = str(e)[:2000]
             failed += 1
 
     db.commit()
-
     result = {
         "status": "success" if failed == 0 else "partial",
         "sync_month": sync_month,
@@ -294,7 +299,6 @@ async def push_to_aitable(db: Session, *, sync_month: str | None = None) -> dict
         "failed": failed,
         "total": len(pending_records),
     }
-
     await broadcaster.broadcast("sync.pushed", result)
     return result
 
@@ -309,7 +313,76 @@ def _acquire_dispatch_write_lock(db: Session) -> None:
     })
 
 
-async def _build_dispatch_aitable_lookup() -> dict[str, list[str]]:
+def _month_from_value(value) -> str | None:
+    """Extract a canonical YYYY-MM from a date-like value."""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m")
+    if isinstance(value, date):
+        return value.strftime("%Y-%m")
+    if isinstance(value, dict):
+        value = value.get("value") or value.get("date") or value.get("text") or value.get("iso")
+    text_value = extract_text(value) or ""
+    match = re.search(r"(\d{4})[-/]?(\d{2})", text_value)
+    if not match:
+        return None
+    year, month = int(match.group(1)), int(match.group(2))
+    if not 1 <= month <= 12:
+        return None
+    return f"{year:04d}-{month:02d}"
+
+
+def _record_sync_month(record: dict) -> str | None:
+    cells = record.get("cells") or {}
+    return _month_from_value(cells.get(DISPATCH["记录时间"]))
+
+
+def _get_or_create_work_order_sync(db: Session, wo: WorkOrder, sync_month: str) -> WorkOrderSync:
+    """Return the monthly association, creating it for deferred work orders."""
+    association = db.query(WorkOrderSync).filter(
+        WorkOrderSync.pts_order_id == wo.pts_order_id,
+        WorkOrderSync.sync_month == sync_month,
+    ).first()
+    if association is None:
+        association = WorkOrderSync(
+            id=uuid.uuid4(),
+            work_order_id=wo.id,
+            pts_order_id=wo.pts_order_id,
+            sync_month=sync_month,
+            sync_status="pending",
+            create_eligible=True,
+        )
+        db.add(association)
+    return association
+
+
+def _prepare_monthly_candidate(
+    db: Session,
+    wo: WorkOrder,
+    sync_month: str,
+) -> WorkOrderSync | None:
+    """Prepare one target-month association without mutating old-month rows."""
+    association = _get_or_create_work_order_sync(db, wo, sync_month)
+    if association.sync_status == "synced" and association.aitable_record_id:
+        wo.dt_record_id = association.aitable_record_id
+        wo.dt_synced_month = sync_month
+        wo.dt_create_eligible = False
+        wo.dt_sync_status = "synced"
+        return None
+
+    association.create_eligible = True
+    # Failed writes are retryable on the next sync. A previously synced
+    # association is handled above and must not be recreated.
+    if association.sync_status != "pending":
+        association.sync_status = "pending"
+    association.error_message = None
+    wo.dt_record_id = association.aitable_record_id
+    wo.dt_synced_month = sync_month
+    wo.dt_create_eligible = True
+    wo.dt_sync_status = "pending"
+    return association
+
+
+async def _build_dispatch_aitable_lookup() -> dict[Any, list[str]]:
     """Build a strict PTS order ID → AITable record IDs lookup.
 
     A missing or incomplete query is an error, not an empty table. This
@@ -328,7 +401,7 @@ async def _build_dispatch_aitable_lookup() -> dict[str, list[str]]:
         strict=True,
     )
 
-    lookup: dict[str, list[str]] = {}
+    lookup: dict[Any, list[str]] = {}
     link_field_id = DISPATCH["巡检工单链接"]
     for record in records:
         cells = record.get("cells", {})
@@ -338,7 +411,10 @@ async def _build_dispatch_aitable_lookup() -> dict[str, list[str]]:
         record_id = record.get("recordId")
         if not record_id:
             raise RuntimeError(f"AITable record for PTS order {pts_id} has no recordId")
-        lookup.setdefault(pts_id, []).append(record_id)
+        month = _record_sync_month(record)
+        if not month:
+            raise RuntimeError(f"AITable record for PTS order {pts_id} has no valid sync month")
+        lookup.setdefault((pts_id, month), []).append(record_id)
 
     duplicate_count = sum(1 for ids in lookup.values() if len(ids) > 1)
     logger.info(
@@ -350,78 +426,110 @@ async def _build_dispatch_aitable_lookup() -> dict[str, list[str]]:
 
 
 async def _sync_to_aitable(
-    db: Session,
+    db: Session | None,
     wo: WorkOrder,
     sync_month: str | None = None,
-    aitable_lookup: dict[str, list[str]] | None = None,
+    aitable_lookup: dict[Any, list[str]] | None = None,
+    sync_association: WorkOrderSync | None = None,
 ) -> None:
-    """Create only eligible new work orders after strict URL deduplication.
-
-    Existing AITable records are reused by record ID without updating them.
-    No path in this function falls through from a failed update to create.
-    """
-    del db  # kept in the signature for the existing service call sites
+    """Create or reuse only the target month's AITable association."""
     settings = get_settings()
     if not settings.dt_dispatch_base_id or not settings.dt_dispatch_table_id:
         raise RuntimeError("AITable dispatch base_id/table_id is not configured")
 
-    if not wo.dt_create_eligible or wo.dt_record_id:
+    target_month = sync_month or current_month()
+    if sync_association is None and db is not None:
+        sync_association = _get_or_create_work_order_sync(db, wo, target_month)
+        if sync_association.sync_status == "synced" and sync_association.aitable_record_id:
+            wo.dt_record_id = sync_association.aitable_record_id
+            wo.dt_synced_month = target_month
+            wo.dt_create_eligible = False
+            wo.dt_sync_status = "synced"
+            return
+
+    if not wo.dt_create_eligible and not (
+        sync_association is not None and sync_association.create_eligible
+    ):
         logger.info("Skipping non-eligible AITable write for %s", wo.pts_order_id)
         return
 
     if aitable_lookup is None:
         aitable_lookup = await _build_dispatch_aitable_lookup()
 
-    matches = aitable_lookup.get(wo.pts_order_id, [])
+    month_key = (wo.pts_order_id, target_month)
+    if month_key in aitable_lookup:
+        matches = aitable_lookup.get(month_key, [])
+        lookup_key: object = month_key
+    elif sync_month is None and wo.pts_order_id in aitable_lookup:
+        # Keep the private helper's legacy call contract for V1/unit callers.
+        matches = aitable_lookup.get(wo.pts_order_id, [])
+        lookup_key = wo.pts_order_id
+    else:
+        matches = []
+        lookup_key = wo.pts_order_id if sync_month is None else month_key
+
     if len(matches) > 1:
         wo.dt_sync_status = "dedup_conflict"
+        if sync_association is not None:
+            sync_association.sync_status = "dedup_conflict"
+            sync_association.create_eligible = False
+            sync_association.error_message = f"同月存在 {len(matches)} 条 AITable 记录"
         logger.error(
-            "Refusing AITable write for %s: %d records share the same PTS link (%s)",
+            "Refusing AITable write for %s/%s: %d records share the monthly PTS link (%s)",
             wo.pts_order_id,
+            target_month,
             len(matches),
             ",".join(matches),
         )
         return
 
     if len(matches) == 1:
-        # The link is already present. Reuse the existing association, but do
-        # not update the DingTalk row as part of the new-record path.
-        wo.dt_record_id = matches[0]
+        record_id = matches[0]
+        wo.dt_record_id = record_id
         wo.dt_create_eligible = False
         wo.dt_sync_status = "synced"
         wo.dt_synced_at = datetime.now(timezone.utc)
-        wo.dt_synced_month = sync_month or current_month()
+        wo.dt_synced_month = target_month
+        if sync_association is not None:
+            sync_association.aitable_record_id = record_id
+            sync_association.create_eligible = False
+            sync_association.sync_status = "synced"
+            sync_association.synced_at = wo.dt_synced_at
+            sync_association.error_message = None
         logger.info(
-            "Dedup: reused existing AITable record %s for PTS order %s; no create/update",
-            matches[0],
+            "Dedup: reused AITable record %s for PTS order %s/%s; no create/update",
+            record_id,
             wo.pts_order_id,
+            target_month,
         )
         return
 
     result = await dingtalk_client.create_records(
-        [{"cells": _work_order_to_cells(wo)}],
+        [{"cells": _work_order_to_cells(wo, sync_month=target_month)}],
         base_id=settings.dt_dispatch_base_id,
         table_id=settings.dt_dispatch_table_id,
     )
     if result is None:
         wo.dt_sync_status = "failed"
+        if sync_association is not None:
+            sync_association.sync_status = "failed"
+            sync_association.error_message = "AITable create returned no result"
         logger.error("Failed to create AITable record for work order %s", wo.pts_order_id)
         return
 
-    got_record_id = False
+    record_id = None
     if isinstance(result, dict):
         new_ids = result.get("newRecordIds", [])
         if isinstance(new_ids, list) and new_ids:
-            wo.dt_record_id = new_ids[0]
-            got_record_id = True
-    elif isinstance(result, list) and result:
-        rid = result[0].get("recordId") or result[0].get("record_id")
-        if rid:
-            wo.dt_record_id = rid
-            got_record_id = True
+            record_id = new_ids[0]
+    elif isinstance(result, list) and result and isinstance(result[0], dict):
+        record_id = result[0].get("recordId") or result[0].get("record_id")
 
-    if not got_record_id:
+    if not record_id:
         wo.dt_sync_status = "failed"
+        if sync_association is not None:
+            sync_association.sync_status = "failed"
+            sync_association.error_message = "AITable create returned no record ID"
         logger.error(
             "AITable create returned no record ID for work order %s, result=%s",
             wo.pts_order_id,
@@ -429,11 +537,19 @@ async def _sync_to_aitable(
         )
         return
 
+    now = datetime.now(timezone.utc)
+    wo.dt_record_id = str(record_id)
     wo.dt_create_eligible = False
     wo.dt_sync_status = "synced"
-    wo.dt_synced_at = datetime.now(timezone.utc)
-    wo.dt_synced_month = sync_month or current_month()
-    aitable_lookup[wo.pts_order_id] = [wo.dt_record_id]
+    wo.dt_synced_at = now
+    wo.dt_synced_month = target_month
+    if sync_association is not None:
+        sync_association.aitable_record_id = str(record_id)
+        sync_association.create_eligible = False
+        sync_association.sync_status = "synced"
+        sync_association.synced_at = now
+        sync_association.error_message = None
+    aitable_lookup[lookup_key] = [str(record_id)]
 
 
 
@@ -461,7 +577,7 @@ def _extract_fields(raw: dict) -> dict:
         "other_types__other_types": "其他",
     }
     types = raw.get("type", [])
-    type_names = [type_display.get(t, t) for t in types] if isinstance(types, list) else [str(types)]
+    type_names: list[str] = [str(type_display.get(t, t)) for t in types] if isinstance(types, list) else [str(types)]
 
     # Parse plan_complete_date (convert UTC to UTC+8 for China timezone)
     plan_date = None
@@ -642,7 +758,7 @@ _DISPATCH_REGION_TO_AITABLE_ID: dict[str, str] = {
 }
 
 
-def _work_order_to_cells(wo: WorkOrder) -> dict:
+def _work_order_to_cells(wo: WorkOrder, *, sync_month: str | None = None) -> dict:
     """Convert work order to AITable cells dict for 客户巡检派单 table.
 
     Field mapping (客户巡检派单 ← PTS):
@@ -659,9 +775,11 @@ def _work_order_to_cells(wo: WorkOrder) -> dict:
     """
     cells = {}
 
-    # 记录时间 → 同步写入时间 (date)
-    now = datetime.now(timezone.utc)
-    cells[DISPATCH["记录时间"]] = now.strftime("%Y-%m-%d")
+    # 记录时间 is the first day of the target synchronization month.  It is
+    # intentionally not the wall-clock date, so deferred orders stay grouped
+    # under the month they are being synchronized into.
+    target_month = sync_month or current_month()
+    cells[DISPATCH["记录时间"]] = f"{target_month}-01"
 
     # 巡检工单链接 (url type)
     cells[DISPATCH["巡检工单链接"]] = f"https://pts.chaitin.net/project/order/{wo.pts_order_id}"

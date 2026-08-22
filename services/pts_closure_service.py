@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from core.config import get_settings
 from models.trigger_log import TriggerLog
 from models.work_order import WorkOrder
+from models.work_order_sync import WorkOrderSync
 from services import pts_client
 from services.aitable_fields import DISPATCH, extract_select_name
 from services import dingtalk_client
@@ -789,8 +790,14 @@ async def close_work_order_after_email(
 
     Returns {"success": bool, "message": str}
     """
-    # 1. Find work order by dt_record_id
-    wo = db.query(WorkOrder).filter(WorkOrder.dt_record_id == record_id).first()
+    # Resolve the monthly association first; the legacy WorkOrder column only
+    # stores one record and cannot distinguish deferred monthly instances.
+    wo = db.query(WorkOrder).join(
+        WorkOrderSync,
+        WorkOrderSync.work_order_id == WorkOrder.id,
+    ).filter(WorkOrderSync.aitable_record_id == record_id).first()
+    if wo is None:
+        wo = db.query(WorkOrder).filter(WorkOrder.dt_record_id == record_id).first()
     if not wo:
         logger.warning("No work order found for AITable record %s", record_id)
         return {"success": False, "message": f"未找到 AITable 记录 {record_id} 对应的工单"}

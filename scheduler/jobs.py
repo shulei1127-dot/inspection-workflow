@@ -128,6 +128,21 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
             registered_ids.append("review:pipeline")
             logger.info("Registered review pipeline job with cron: %s", review_cron)
 
+    # Sales confirm job (巡检确认表单推送)
+    if settings.sales_confirm_enabled:
+        sales_confirm_cron = settings.sales_confirm_cron.strip()
+        if sales_confirm_cron:
+            scheduler.add_job(
+                _run_sales_confirm_job,
+                trigger=CronTrigger.from_crontab(sales_confirm_cron, timezone=tz),
+                id="sales-confirm:push",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
+            registered_ids.append("sales-confirm:push")
+            logger.info("Registered sales confirm job with cron: %s", sales_confirm_cron)
+
     # Daily change summary job
     if settings.daily_change_summary_enabled:
         daily_summary_cron = settings.daily_change_summary_cron.strip()
@@ -485,3 +500,23 @@ def _run_daily_digest_job() -> None:
         logger.info("Daily digest job completed")
     except Exception as e:
         logger.exception("Daily digest job failed: %s", e)
+
+def _run_sales_confirm_job() -> None:
+    """Scheduled sales confirm push job (巡检确认表单推送)."""
+    from core.config import get_settings as _gs
+    from services.sales_confirm_service import run_sales_confirm
+
+    settings = _gs()
+    try:
+        result = asyncio.run(run_sales_confirm(dry_run=settings.sales_confirm_dry_run))
+        logger.info(
+            "Scheduled sales confirm job completed: scanned=%d candidates=%d sent=%d skipped=%d errors=%d dry_run=%s",
+            result.get("scanned", 0),
+            result.get("candidates", 0),
+            result.get("sent", 0),
+            result.get("skipped", 0),
+            result.get("errors", 0),
+            result.get("dry_run", True),
+        )
+    except Exception as e:
+        logger.exception("Scheduled sales confirm job failed: %s", e)

@@ -83,11 +83,18 @@ class Settings(BaseSettings):
     pts_review_api_token: str = ""  # 审核 PTS API Token（空则回退到 pts_api_token）
     pts_review_approval_api_key: str = ""  # 审核通过/拒绝专用 API Key
     pts_review_after_sale_filter_ids: str = ""  # 按售后 PTS 用户 ID 过滤（逗号分隔）
+    review_license_autofill_enabled: bool = True  # 审核时按机器码关联 License 自动补全 License ID
+    review_license_autofill_writeback: bool = True  # 自动补全后写回 PTS 产品表单
 
     # Review 钉钉数据表配置
     review_aitable_base_id: str = "o14dA3GK8g5LavPaT7dDQqoxV9ekBD76"
     review_aitable_main_table_id: str = "Igz9TVd"
     review_aitable_corp_id: str = "ding56395822e2c6d50035c2f4657eb6378f"
+
+    # Sales confirm (销售巡检确认表单推送)
+    sales_confirm_enabled: bool = False  # 总开关（默认关闭）
+    sales_confirm_cron: str = "0 9 * * *"  # 每天9点推送
+    sales_confirm_dry_run: bool = True  # 是否仅扫描不发送（默认开启，避免误发）
 
     # Visit (交付转售后回访闭环)
     visit_pipeline_enabled: bool = False  # 回访流水线总开关（默认关闭）

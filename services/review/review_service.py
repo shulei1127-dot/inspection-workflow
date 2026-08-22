@@ -20,7 +20,12 @@ from services.review.extractors.review_approval_time import extract_approval_tim
 from services.review.extractors.review_main_page import extract_project_data
 from services.review.extractors.review_product_detail import extract_product_detail
 from services.review.extractors.review_project_list import extract_pending_projects
-from services.review.pts_review_client import submit_review
+from services.review.pts_review_client import (
+    fetch_company_by_id,
+    fetch_release_licenses,
+    submit_review,
+    update_product_info_license_id,
+)
 from services.review.review_dingtalk import (
     compute_delivery_type,
     compute_project_type,
@@ -152,6 +157,23 @@ async def audit_single_project(project_id: str, *, skip_rules: set[int] | None =
         logger.error("采集项目详情失败: project_id=%s, error=%s", project_id, exc)
         return {"project_id": project_id, "error": f"采集项目详情失败: {exc}"}
 
+    # 从项目关联公司查询客户销售。销售查询失败不阻断审核，但不以空值覆盖钉钉已有字段。
+    if not project_data.company_id:
+        project_data.sales_lookup_status = "missing_company_id"
+    else:
+        company_data = await fetch_company_by_id(project_data.company_id)
+        company = (company_data or {}).get("CompanyByID") if company_data else None
+        claim_by = (company or {}).get("claim_by") if isinstance(company, dict) else None
+        if isinstance(claim_by, dict) and claim_by.get("name"):
+            project_data.sales_name = claim_by.get("name")
+            project_data.sales_pts_id = claim_by.get("id")
+            project_data.sales_pts_username = claim_by.get("username")
+            project_data.sales_lookup_status = "found"
+        elif company_data is None:
+            project_data.sales_lookup_status = "lookup_error"
+        else:
+            project_data.sales_lookup_status = "not_found"
+
     # 获取产品详情
     product_details = []
     for product in project_data.products:
@@ -181,6 +203,31 @@ async def audit_single_project(project_id: str, *, skip_rules: set[int] | None =
         if len(parts) == 2 and parts[0] in renewal_prefixes:
             detail.is_renewal_record = True
 
+    # License ID 自动补全：产品 License ID 为空但机器码关联的 License 中，
+    # 最新一条的性质与产品填写的 License 性质对应时，自动补全 License ID。
+    settings = get_settings()
+    license_autofill_logs: list[dict[str, Any]] = []
+    if settings.review_license_autofill_enabled:
+        for detail in product_details:
+            try:
+                filled = await _autofill_license_id(detail)
+                if filled:
+                    license_autofill_logs.append(filled)
+            except Exception as exc:
+                logger.warning("License ID 自动补全失败: product_id=%s, error=%s", detail.product_id, exc)
+
+    # 自动补全成功后写回 PTS 产品表单（受开关控制）
+    if settings.review_license_autofill_writeback:
+        for log_item in license_autofill_logs:
+            try:
+                ok = await update_product_info_license_id(
+                    log_item["product_id"], log_item["license_id"],
+                )
+                log_item["writeback"] = "ok" if ok else "failed"
+            except Exception as exc:
+                logger.warning("License ID 写回 PTS 失败: product_id=%s, error=%s", log_item["product_id"], exc)
+                log_item["writeback"] = f"error: {exc}"
+
     # 获取审批时间
     approval_time = None
     try:
@@ -193,6 +240,12 @@ async def audit_single_project(project_id: str, *, skip_rules: set[int] | None =
         project_id=project_data.project_id,
         project_name=project_data.project_name,
         customer_name=project_data.customer_name,
+        company_id=project_data.company_id,
+        crm_project_id=project_data.crm_project_id,
+        sales_name=project_data.sales_name,
+        sales_pts_id=project_data.sales_pts_id,
+        sales_pts_username=project_data.sales_pts_username,
+        sales_lookup_status=project_data.sales_lookup_status,
         delivery_stage=project_data.delivery_stage,
         stage_status=project_data.stage_status,
         after_sales_leader=project_data.after_sales_leader,
@@ -252,6 +305,12 @@ async def audit_single_project(project_id: str, *, skip_rules: set[int] | None =
         "project_id": project_id,
         "project_name": audit_result.project_name,
         "customer_name": audit_result.customer_name,
+        "company_id": audit_result.company_id,
+        "crm_project_id": audit_result.crm_project_id,
+        "sales_name": audit_result.sales_name,
+        "sales_pts_id": audit_result.sales_pts_id,
+        "sales_pts_username": audit_result.sales_pts_username,
+        "sales_lookup_status": audit_result.sales_lookup_status,
         "conclusion": audit_result.conclusion,
         "region": audit_result.region,
         "delivery_type": audit_result.delivery_type,
@@ -260,6 +319,7 @@ async def audit_single_project(project_id: str, *, skip_rules: set[int] | None =
             {"rule_id": r.rule_id, "rule_name": r.rule_name, "result": r.result, "message": r.message}
             for r in audit_result.rules
         ],
+        "license_autofill": license_autofill_logs,
         "dingtalk_writeback": dingtalk_result,
         "pts_review_writeback": pts_review_result,
     }
@@ -351,3 +411,70 @@ def _has_real_device_info(detail) -> bool:
         if value and value.strip() not in _PLACEHOLDER_VALUES:
             return True
     return False
+
+
+# ── License ID 自动补全辅助函数 ─────────────────────────────────
+
+# 产品 License 性质 → 机器码关联 License 的 (purpose, permanent_license) 匹配键
+# 注意: permanent（永久）等同于正式交付-永久
+_LICENSE_NATURE_TO_PURPOSE_PERMANENT: dict[str, tuple[str, bool]] = {
+    "permanent": ("formal_delivery", True),
+    "正式交付-永久": ("formal_delivery", True),
+    "formal_delivery_permanent": ("formal_delivery", True),
+    "poc_not_permanent": ("poc", False),
+    "正式交付-非永久": ("formal_delivery", False),
+    "formal_delivery_not_permanent": ("formal_delivery", False),
+    "formal_delivery_non_permanent": ("formal_delivery", False),
+    "formal_delivery_non_permanent_license": ("formal_delivery", False),
+}
+
+_REVOKED_STATUSES = {"revoked", "revoking"}
+
+
+async def _autofill_license_id(detail) -> dict[str, Any] | None:
+    """按机器码关联的 License 自动补全产品 License ID。
+
+    前提：产品填写的 License 性质与机器码关联 License 中最新一条的性质对应。
+    仅当 License ID 为空、存在机器码且找到匹配 License 时补全。
+
+    Returns:
+        补全成功返回补全信息 dict（含 product_id/license_type/license_id），否则返回 None。
+    """
+    if detail.is_renewal_record:
+        return None
+    if detail.license_id and detail.license_id.strip():
+        return None
+
+    machine_code = (detail.machine_code or "").strip()
+    if not machine_code or machine_code in _PLACEHOLDER_VALUES:
+        return None
+
+    expected = _LICENSE_NATURE_TO_PURPOSE_PERMANENT.get((detail.license_type or "").strip())
+    if expected is None:
+        return None
+
+    licenses = await fetch_release_licenses(detail.product_id, machine_code)
+    if not licenses:
+        return None
+
+    # 过滤已吊销/吊销中的记录，最新一条为列表首条（PTS 默认最新在前）
+    active = [lic for lic in licenses if lic.get("revoke_status") not in _REVOKED_STATUSES]
+    if not active:
+        return None
+
+    purpose, permanent = expected
+    latest = active[0]
+    if latest.get("purpose") != purpose or bool(latest.get("permanent_license")) != permanent:
+        return None
+
+    license_id = (latest.get("license_id") or "").strip()
+    if not license_id:
+        return None
+
+    detail.license_id = license_id
+    return {
+        "product_id": detail.product_id,
+        "product_category": detail.product_category,
+        "license_type": detail.license_type,
+        "license_id": license_id,
+    }

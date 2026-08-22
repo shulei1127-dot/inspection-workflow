@@ -498,7 +498,13 @@ async def send_inspection_email(
         # Update WorkOrder email status in local DB
         try:
             from models.work_order import WorkOrder
-            wo = db.query(WorkOrder).filter(WorkOrder.dt_record_id == record_id).first()
+            from models.work_order_sync import WorkOrderSync
+            wo = db.query(WorkOrder).join(
+                WorkOrderSync,
+                WorkOrderSync.work_order_id == WorkOrder.id,
+            ).filter(WorkOrderSync.aitable_record_id == record_id).first()
+            if wo is None:
+                wo = db.query(WorkOrder).filter(WorkOrder.dt_record_id == record_id).first()
             if wo:
                 wo.email_trigger_status = "已发送"
                 wo.email_sent = "是"

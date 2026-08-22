@@ -233,6 +233,20 @@ QUERY_DELIVERY_BY_ID = """query DeliveryById($id: ID!) {
   }
 }"""
 
+QUERY_COMPANY_BY_ID = """query CompanyByID($id: ID!) {
+  CompanyByID(id: $id) {
+    id
+    name
+    claim_by {
+      id
+      name
+      username
+      __typename
+    }
+    __typename
+  }
+}"""
+
 QUERY_PRODUCT_INFO_BY_ID = """query ProductInfoByID($id: ID!) {
   productInfoByID(id: $id) {
     id
@@ -273,6 +287,18 @@ QUERY_PRODUCT_INFO_BY_ID = """query ProductInfoByID($id: ID!) {
       patch_version
       __typename
     }
+    __typename
+  }
+}"""
+
+QUERY_LIST_RELEASE_LICENSE = """query ListReleaseLicense($product_info_id: String!, $machine_code: String) {
+  list_release_license(product_info_id: $product_info_id, machine_code: $machine_code) {
+    license_id
+    purpose
+    permanent_license
+    not_valid_before
+    not_valid_after
+    revoke_status
     __typename
   }
 }"""
@@ -462,6 +488,17 @@ async def fetch_delivery_by_id(project_id: str) -> dict | None:
         return None
 
 
+async def fetch_company_by_id(company_id: str) -> dict | None:
+    """按公司 ID 获取 PTS 客户及其销售负责人。"""
+    if not company_id:
+        return None
+    try:
+        return await review_pts_query(QUERY_COMPANY_BY_ID, {"id": company_id})
+    except Exception:
+        logger.exception("fetch_company_by_id failed: company_id=%s", company_id)
+        return None
+
+
 async def fetch_product_info_by_id(product_id: str) -> dict | None:
     """按 ID 获取产品详情。"""
     try:
@@ -469,6 +506,116 @@ async def fetch_product_info_by_id(product_id: str) -> dict | None:
     except Exception:
         logger.exception("fetch_product_info_by_id failed: product_id=%s", product_id)
         return None
+
+
+async def fetch_release_licenses(product_info_id: str, machine_code: str | None = None) -> list[dict]:
+    """按产品信息 ID + 机器码查询关联的 Release License 列表（默认最新在前）。"""
+    try:
+        result = await review_pts_query(
+            QUERY_LIST_RELEASE_LICENSE,
+            {"product_info_id": product_info_id, "machine_code": machine_code},
+        )
+    except Exception:
+        logger.exception("fetch_release_licenses failed: product_info_id=%s", product_info_id)
+        return []
+    records = (result or {}).get("list_release_license") or []
+    return [r for r in records if isinstance(r, dict)]
+
+
+UPDATE_PRODUCT_INFO_MUTATION = """mutation UpdateProductInfo($id: ID!, $input: AfterInfoFieldParam!) {
+  update_product_info(id: $id, input: $input)
+}"""
+
+_AFTER_INFO_INPUT_FIELDS = [
+    "type_number", "serial_number", "needle_version", "needle_number",
+    "end_number", "publish_server_number", "os_version", "kernel_version",
+    "docker_version", "stage_mode", "product_version", "license_nature",
+    "license_id", "license_validity", "after_sales_validity",
+    "last_inspection_date", "is_ha", "engine_version", "rank", "desc",
+    "note", "machine_code", "patch_version",
+]
+
+
+async def update_product_info_license_id(product_info_id: str, license_id: str) -> bool | None:
+    """写回 PTS 产品 License ID（仅更新 license_id 字段）。
+
+    为避免 update_product_info 全量覆盖语义导致其它字段丢失，
+    先读取产品原始 after_info，用原字段 + 新 license_id 全量写回。
+
+    Returns:
+        True/False 表示 mutation 返回结果，失败或未配置 token 时返回 None。
+    """
+    settings = get_settings()
+    token = settings.pts_review_api_token or settings.pts_api_token
+    if not token:
+        logger.warning("PTS API token 未配置，无法写回 License ID")
+        return None
+
+    import httpx
+
+    raw = await fetch_product_info_by_id(product_info_id)
+    if not raw or not raw.get("productInfoByID"):
+        logger.warning("update_product_info_license_id: 无法读取产品原始 after_info, product_info_id=%s", product_info_id)
+        return None
+
+    raw_after = (raw.get("productInfoByID") or {}).get("after_info") or {}
+    payload_input: dict = {
+        field: raw_after.get(field)
+        for field in _AFTER_INFO_INPUT_FIELDS
+        if field in raw_after
+    }
+    payload_input["license_id"] = license_id
+
+    payload = {
+        "query": UPDATE_PRODUCT_INFO_MUTATION,
+        "variables": {"id": product_info_id, "input": payload_input},
+    }
+
+    import asyncio
+
+    for attempt in range(1, _429_MAX_RETRIES + 1):
+        await _rate_limit()
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    settings.pts_graphql_url,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {token}",
+                    },
+                    json=payload,
+                )
+        except Exception:
+            logger.exception("update_product_info_license_id failed: product_info_id=%s", product_info_id)
+            return None
+
+        if resp.status_code == 429:
+            if attempt < _429_MAX_RETRIES:
+                logger.warning("update_product_info_license_id 429 限流，%.0fs 后重试 (%d/%d)", _429_BASE_DELAY_S * attempt, attempt, _429_MAX_RETRIES)
+                await asyncio.sleep(_429_BASE_DELAY_S * attempt)
+                continue
+            logger.error("update_product_info_license_id 持续 429 限流: product_info_id=%s", product_info_id)
+            return None
+        if resp.status_code != 200:
+            logger.error(
+                "update_product_info_license_id failed: HTTP %d, body=%s",
+                resp.status_code, resp.text[:300],
+            )
+            return None
+
+        data = resp.json()
+        if data.get("errors"):
+            logger.error("update_product_info_license_id mutation error: %s", data["errors"])
+            return None
+
+        result = data.get("data", {}).get("update_product_info")
+        logger.info(
+            "update_product_info_license_id writeback: product_info_id=%s, license_id=%s, ok=%s",
+            product_info_id, license_id, result,
+        )
+        return bool(result)
+
+    return None
 
 
 async def fetch_related_tasks(project_id: str) -> dict | None:

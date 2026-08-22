@@ -11,12 +11,14 @@ from sqlalchemy.orm import Session
 from core.db import get_db
 from models.sync_log import SyncLog
 from models.work_order import WorkOrder
+from models.work_order_sync import WorkOrderSync
 from services.sync_service import (
     run_sync,
     push_to_aitable,
     _sync_to_aitable,
     _build_dispatch_aitable_lookup,
     _acquire_dispatch_write_lock,
+    _prepare_monthly_candidate,
     current_month,
 )
 from apps.api.utils import fmt_cst
@@ -76,7 +78,7 @@ async def batch_push_to_dingtalk(
     items: list[dict] = []
     seen_ids: set[str] = set()
     seen_pts_ids: set[str] = set()
-    candidates: list[WorkOrder] = []
+    candidates: list[tuple[WorkOrder, WorkOrderSync]] = []
     sync_month = current_month()
 
     for wo_id_str in req.work_order_ids:
@@ -99,7 +101,7 @@ async def batch_push_to_dingtalk(
             items.append({"work_order_id": wo_id_str, "status": "failed", "reason": "work order not found"})
             continue
 
-        if not wo.dt_create_eligible or wo.dt_record_id:
+        if not wo.dt_create_eligible:
             skipped += 1
             items.append({
                 "work_order_id": wo_id_str,
@@ -120,7 +122,17 @@ async def batch_push_to_dingtalk(
             continue
 
         seen_pts_ids.add(wo.pts_order_id)
-        candidates.append(wo)
+        association = _prepare_monthly_candidate(db, wo, sync_month)
+        if association is None:
+            skipped += 1
+            items.append({
+                "work_order_id": wo_id_str,
+                "pts_order_id": wo.pts_order_id,
+                "status": "skipped",
+                "reason": "target month already synced",
+            })
+            continue
+        candidates.append((wo, association))
 
     if candidates:
         try:
@@ -128,7 +140,7 @@ async def batch_push_to_dingtalk(
             aitable_lookup = await _build_dispatch_aitable_lookup()
         except Exception as e:
             logger.error("AITable dedup query failed; aborting batch push: %s", e)
-            for wo in candidates:
+            for wo, _association in candidates:
                 failed += 1
                 items.append({
                     "work_order_id": str(wo.id),
@@ -137,7 +149,7 @@ async def batch_push_to_dingtalk(
                     "reason": "AITable dedup query failed",
                 })
         else:
-            for wo in candidates:
+            for wo, association in candidates:
                 try:
                     wo.dt_sync_status = "pending"
                     await _sync_to_aitable(
@@ -145,6 +157,7 @@ async def batch_push_to_dingtalk(
                         wo,
                         sync_month=sync_month,
                         aitable_lookup=aitable_lookup,
+                        sync_association=association,
                     )
                     if wo.dt_sync_status == "synced" and wo.dt_record_id:
                         pushed += 1

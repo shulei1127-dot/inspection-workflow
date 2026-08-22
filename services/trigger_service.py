@@ -15,11 +15,17 @@ from sqlalchemy.orm import Session
 
 from models.trigger_log import TriggerLog
 from models.work_order import WorkOrder
+from models.work_order_sync import WorkOrderSync
 
 logger = logging.getLogger(__name__)
 
 
-async def trigger_yunji_dispatch(db: Session, work_order_id: uuid.UUID) -> dict:
+async def trigger_yunji_dispatch(
+    db: Session,
+    work_order_id: uuid.UUID,
+    *,
+    record_id: str | None = None,
+) -> dict:
     """Trigger yunji dispatch for a work order.
 
     Idempotent: skip if a successful trigger_log already exists.
@@ -29,10 +35,16 @@ async def trigger_yunji_dispatch(db: Session, work_order_id: uuid.UUID) -> dict:
         return {"status": "error", "message": "Work order not found"}
 
     pts_url = wo.pts_order_url or f"https://pts.chaitin.net/project/order/{wo.pts_order_id}"
-    supplier = wo.partner_supplier
+    supplier = wo.partner_supplier or ""
 
-    result = await _call_yunji_dispatch(db, work_order_id, pts_url, supplier,
-                                         trigger_reason=f"工程师={wo.engineer}, 伙伴服务商={wo.partner_supplier}")
+    result = await _call_yunji_dispatch(
+        db,
+        work_order_id,
+        pts_url,
+        supplier or "",
+        trigger_reason=f"工程师={wo.engineer}, 伙伴服务商={wo.partner_supplier}",
+        aitable_record_id=record_id,
+    )
 
     if result.get("status") == "success":
         await _broadcast_trigger("trigger.dispatch.success", wo)
@@ -54,9 +66,13 @@ async def dispatch_from_aitable(
     Does NOT require a local WorkOrder. Creates a trigger_log linked
     to a dummy work_order (or None if no match). Returns demandId and orderId.
     """
-    # Try to find a matching WorkOrder by customer_name for trigger_log
-    wo = None
-    if customer_name:
+    # Resolve the exact monthly WorkOrderSync first; customer name is only a
+    # compatibility fallback for records created before the association table.
+    wo = db.query(WorkOrder).join(
+        WorkOrderSync,
+        WorkOrderSync.work_order_id == WorkOrder.id,
+    ).filter(WorkOrderSync.aitable_record_id == record_id).first()
+    if wo is None and customer_name:
         wo = db.query(WorkOrder).filter(WorkOrder.customer_name == customer_name).first()
 
     work_order_id = wo.id if wo else None
@@ -64,7 +80,7 @@ async def dispatch_from_aitable(
     result = await _call_yunji_dispatch(
         db, work_order_id, pts_url, supplier,
         trigger_reason=f"AITable派单: 供应商={supplier}, 客户={customer_name}, record={record_id}",
-        skip_idempotency=True,  # AITable records don't have prior trigger_logs
+        aitable_record_id=record_id,
     )
 
     # Broadcast WebSocket event for frontend display
@@ -86,12 +102,13 @@ async def dispatch_from_aitable(
 
 async def _call_yunji_dispatch(
     db: Session,
-    work_order_id: uuid.UUID,
+    work_order_id: uuid.UUID | None,
     pts_url: str,
     supplier: str,
     *,
     trigger_reason: str,
     skip_idempotency: bool = False,
+    aitable_record_id: str | None = None,
 ) -> dict:
     """Core yunji dispatch: direct API call (no Puppeteer).
 
@@ -105,11 +122,19 @@ async def _call_yunji_dispatch(
     """
     # Idempotency check
     if not skip_idempotency:
-        existing = db.query(TriggerLog).filter(
-            TriggerLog.work_order_id == work_order_id,
+        existing_query = db.query(TriggerLog).filter(
             TriggerLog.trigger_type == "yunji_dispatch",
             TriggerLog.status == "success",
-        ).first()
+        )
+        if aitable_record_id:
+            existing_query = existing_query.filter(
+                TriggerLog.aitable_record_id == aitable_record_id,
+            )
+        else:
+            existing_query = existing_query.filter(
+                TriggerLog.work_order_id == work_order_id,
+            )
+        existing = existing_query.first()
         if existing:
             return {"status": "skipped", "message": "Already dispatched successfully"}
 
@@ -117,6 +142,7 @@ async def _call_yunji_dispatch(
     log = TriggerLog(
         id=uuid.uuid4(),
         work_order_id=work_order_id,
+        aitable_record_id=aitable_record_id,
         trigger_type="yunji_dispatch",
         trigger_reason=trigger_reason,
         status="pending",
@@ -164,7 +190,12 @@ async def _call_yunji_dispatch(
         return {"status": "failed", "message": str(e)}
 
 
-async def trigger_email_send(db: Session, work_order_id: uuid.UUID) -> dict:
+async def trigger_email_send(
+    db: Session,
+    work_order_id: uuid.UUID,
+    *,
+    record_id: str | None = None,
+) -> dict:
     """Trigger email sending for a work order.
 
     Idempotent: skip if a successful trigger_log already exists.
@@ -174,11 +205,15 @@ async def trigger_email_send(db: Session, work_order_id: uuid.UUID) -> dict:
         return {"status": "error", "message": "Work order not found"}
 
     # Idempotency check
-    existing = db.query(TriggerLog).filter(
-        TriggerLog.work_order_id == work_order_id,
+    existing_query = db.query(TriggerLog).filter(
         TriggerLog.trigger_type == "inspection_email",
         TriggerLog.status == "success",
-    ).first()
+    )
+    if record_id:
+        existing_query = existing_query.filter(TriggerLog.aitable_record_id == record_id)
+    else:
+        existing_query = existing_query.filter(TriggerLog.work_order_id == work_order_id)
+    existing = existing_query.first()
     if existing:
         return {"status": "skipped", "message": "Already sent successfully"}
 
@@ -186,6 +221,7 @@ async def trigger_email_send(db: Session, work_order_id: uuid.UUID) -> dict:
     log = TriggerLog(
         id=uuid.uuid4(),
         work_order_id=work_order_id,
+        aitable_record_id=record_id,
         trigger_type="inspection_email",
         trigger_reason=f"email_sent={wo.email_sent}, email_trigger_status={wo.email_trigger_status}",
         status="pending",
@@ -240,9 +276,13 @@ async def email_from_aitable(
     Does NOT require a local WorkOrder. Creates a trigger_log linked
     to a matching WorkOrder (or dummy UUID). Returns send result.
     """
-    # Try to find a matching WorkOrder for trigger_log
-    wo = None
-    if customer_name:
+    # Resolve by monthly association so a historical record cannot update the
+    # current month's WorkOrder instance by customer name alone.
+    wo = db.query(WorkOrder).join(
+        WorkOrderSync,
+        WorkOrderSync.work_order_id == WorkOrder.id,
+    ).filter(WorkOrderSync.aitable_record_id == record_id).first()
+    if wo is None and customer_name:
         wo = db.query(WorkOrder).filter(WorkOrder.customer_name == customer_name).first()
 
     work_order_id = wo.id if wo else None
@@ -251,6 +291,7 @@ async def email_from_aitable(
     log = TriggerLog(
         id=uuid.uuid4(),
         work_order_id=work_order_id,
+        aitable_record_id=record_id,
         trigger_type="inspection_email",
         trigger_reason=f"AITable邮件: 客户={customer_name}, record={record_id}",
         status="pending",

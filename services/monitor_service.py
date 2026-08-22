@@ -28,6 +28,7 @@ import time
 from sqlalchemy.orm import Session
 
 from models.work_order import WorkOrder
+from models.work_order_sync import WorkOrderSync
 from services import dingtalk_client
 from services.aitable_fields import (
     DISPATCH,
@@ -90,6 +91,17 @@ async def _cached_query_records(
     logger.debug("Cache miss for %s, fetched %d records", cache_key, len(records))
     return records
 
+def _work_order_for_record(db: Session, record_id: str) -> WorkOrder | None:
+    """Resolve an AITable record through its monthly association."""
+    association = db.query(WorkOrderSync).filter(
+        WorkOrderSync.aitable_record_id == record_id,
+    ).first()
+    if association:
+        return db.query(WorkOrder).filter(WorkOrder.id == association.work_order_id).first()
+    # Compatibility for records created before WorkOrderSync migration.
+    return db.query(WorkOrder).filter(WorkOrder.dt_record_id == record_id).first()
+
+
 async def run_monitor_poll(db: Session) -> dict:
     """Run a single monitoring poll cycle (reads from 客户巡检派单 table)."""
     from core.config import get_settings
@@ -117,7 +129,7 @@ async def run_monitor_poll(db: Session) -> dict:
             continue
 
         # Find matching local work order
-        wo = db.query(WorkOrder).filter(WorkOrder.dt_record_id == record_id).first()
+        wo = _work_order_for_record(db, record_id)
         if not wo:
             continue
 
@@ -126,21 +138,10 @@ async def run_monitor_poll(db: Session) -> dict:
         # Sync AITable fields back to local
         _sync_from_aitable(wo, cells)
 
-        # Skip and delete work orders in completion stage (already processed)
+        # Completed PTS orders are retained as historical monthly records.  Do
+        # not delete the shared WorkOrder or another month's AITable instance.
         if wo.status in COMPLETION_STAGES:
-            # Delete AITable record + local DB record
-            if wo.dt_record_id:
-                try:
-                    await dingtalk_client.delete_records(
-                        record_ids=wo.dt_record_id,
-                        base_id=settings.dt_dispatch_base_id,
-                        table_id=settings.dt_dispatch_table_id,
-                    )
-                    logger.info("Deleted AITable record %s for completed work order %s", wo.dt_record_id, wo.pts_order_id)
-                except Exception as e:
-                    logger.error("Failed to delete AITable record %s: %s", wo.dt_record_id, e)
-            db.delete(wo)
-            db.commit()
+            wo.closure_status = "已闭环"
             continue
 
         # Check dispatch trigger condition (only if auto dispatch is enabled)
@@ -150,7 +151,7 @@ async def run_monitor_poll(db: Session) -> dict:
             if has_engineer and has_supplier and wo.dispatch_status == "待派单":
                 from services.trigger_service import trigger_yunji_dispatch
                 try:
-                    result = await trigger_yunji_dispatch(db, wo.id)
+                    result = await trigger_yunji_dispatch(db, wo.id, record_id=record_id)
                     if result.get("status") == "success":
                         wo.dispatch_status = "已派单"
                         dispatch_triggered += 1
@@ -164,7 +165,7 @@ async def run_monitor_poll(db: Session) -> dict:
         if settings.auto_email_enabled and wo.email_sent == "否" and wo.email_trigger_status == "待发送":
             from services.trigger_service import trigger_email_send
             try:
-                result = await trigger_email_send(db, wo.id)
+                result = await trigger_email_send(db, wo.id, record_id=record_id)
                 if result.get("status") == "success":
                     wo.email_trigger_status = "已发送"
                     email_triggered += 1
@@ -382,23 +383,12 @@ async def _lookup_dispatch_emails(customer_name: str | None) -> list[str]:
 
 
 async def _find_pts_url(db: Session, customer_name: str | None, cells: dict) -> str | None:
-    """Find PTS order URL for dispatch.
+    """Find the PTS URL for the exact monthly AITable record.
 
-    Strategy:
-    1. Try to match a local WorkOrder by customer_name → use pts_order_url
-    2. If no match, try to extract from 客户巡检派单 AITable by customer_name
+    The record's own link is authoritative. Customer matching is only a
+    compatibility fallback because one customer can have multiple months.
     """
-    # Strategy 1: Match by customer_name in local DB
-    if customer_name:
-        wo = db.query(WorkOrder).filter(
-            WorkOrder.customer_name == customer_name,
-        ).first()
-        if wo and wo.pts_order_url:
-            return wo.pts_order_url
-        if wo and wo.pts_order_id:
-            return f"https://pts.chaitin.net/project/order/{wo.pts_order_id}"
-
-    # Strategy 2: Try extracting from current cells (DISPATCH table already has 巡检工单链接)
+    # Strategy 1: use the link from the current AITable record.
     link_val = cells.get(DISPATCH["巡检工单链接"])
     if link_val:
         if isinstance(link_val, dict):
@@ -408,7 +398,17 @@ async def _find_pts_url(db: Session, customer_name: str | None, cells: dict) -> 
         elif isinstance(link_val, str) and link_val.startswith("http"):
             return link_val
 
-    # Strategy 3: Query DISPATCH AITable for the PTS link by customer_name
+    # Strategy 2: match a local WorkOrder by customer_name.
+    if customer_name:
+        wo = db.query(WorkOrder).filter(
+            WorkOrder.customer_name == customer_name,
+        ).first()
+        if wo and wo.pts_order_url:
+            return wo.pts_order_url
+        if wo and wo.pts_order_id:
+            return f"https://pts.chaitin.net/project/order/{wo.pts_order_id}"
+
+    # Strategy 3: query DISPATCH as a last compatibility fallback.
     from core.config import get_settings
     settings = get_settings()
     if settings.dt_dispatch_base_id and settings.dt_dispatch_table_id and customer_name:
@@ -417,20 +417,18 @@ async def _find_pts_url(db: Session, customer_name: str | None, cells: dict) -> 
                 base_id=settings.dt_dispatch_base_id,
                 table_id=settings.dt_dispatch_table_id,
             )
-            if records:
-                for rec in records:
-                    rec_cells = rec.get("cells", {})
-                    rec_name = extract_text(rec_cells.get(DISPATCH["客户名称"]))
-                    if rec_name != customer_name:
-                        continue
-                    link_val = rec_cells.get(DISPATCH["巡检工单链接"])
-                    if link_val:
-                        if isinstance(link_val, dict):
-                            url = link_val.get("link") or link_val.get("text", "")
-                            if url:
-                                return url
-                        elif isinstance(link_val, str) and link_val.startswith("http"):
-                            return link_val
+            for rec in records:
+                rec_cells = rec.get("cells", {})
+                rec_name = extract_text(rec_cells.get(DISPATCH["客户名称"]))
+                if rec_name != customer_name:
+                    continue
+                link_val = rec_cells.get(DISPATCH["巡检工单链接"])
+                if isinstance(link_val, dict):
+                    url = link_val.get("link") or link_val.get("text", "")
+                    if url:
+                        return url
+                elif isinstance(link_val, str) and link_val.startswith("http"):
+                    return link_val
         except Exception as e:
             logger.warning("Failed to query DISPATCH AITable for PTS URL: %s", e)
 

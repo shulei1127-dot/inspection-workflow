@@ -15,6 +15,8 @@ _MUYUN_OLD_VERSION_THRESHOLD = "CW-S10-24.01.003"
 
 INFO_TYPE_MAP = {"delivery": "交付", "test": "测试"}
 LICENSE_TYPE_MAP = {
+    "permanent": "永久",
+    "poc_not_permanent": "poc-非永久",
     "formal_delivery_permanent": "正式交付-永久",
     "formal_delivery_non_permanent": "正式交付-非永久",
     "formal_delivery_non_permanent_license": "正式交付-非永久",
@@ -23,6 +25,8 @@ LICENSE_TYPE_MAP = {
 VALID_INFO_TYPES = ["交付", "delivery"]
 VALID_LICENSE_TYPES = [
     "正式交付-永久", "正式交付-非永久",
+    "permanent",
+    "poc_not_permanent",
     "formal_delivery_permanent", "formal_delivery_non_permanent",
     "formal_delivery_not_permanent",
 ]
@@ -146,7 +150,7 @@ def _check_license(product: ProductInfo) -> list[str]:
     elif product.license_type not in VALID_LICENSE_TYPES:
         issues.append('License性质非"正式交付-永久"或"正式交付-非永久"')
 
-    is_permanent = product.license_type in ("formal_delivery_permanent", "正式交付-永久")
+    is_permanent = product.license_type in ("formal_delivery_permanent", "正式交付-永久", "permanent", "永久")
     if _is_empty(product.license_expiry) and not is_permanent:
         issues.append("无License有效期")
     if _is_empty(product.license_id) and not exempt_license_id:

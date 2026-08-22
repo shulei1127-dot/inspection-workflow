@@ -74,6 +74,12 @@ class AuditInput(BaseModel):
     project_id: str
     project_name: str | None = None
     customer_name: str | None = None
+    company_id: str | None = None
+    crm_project_id: str | None = None
+    sales_name: str | None = None
+    sales_pts_id: str | None = None
+    sales_pts_username: str | None = None
+    sales_lookup_status: str | None = None
     delivery_stage: str = ""
     stage_status: str = ""
     after_sales_leader: str = ""
@@ -105,6 +111,12 @@ class AuditResult(BaseModel):
     project_id: str
     project_name: str | None = None
     customer_name: str | None = None
+    company_id: str | None = None
+    crm_project_id: str | None = None
+    sales_name: str | None = None
+    sales_pts_id: str | None = None
+    sales_pts_username: str | None = None
+    sales_lookup_status: str | None = None
     rules: list[RuleResult] = Field(default_factory=list)
     conclusion: AuditConclusion = ""
     value_added_service_reminder: str | None = None
@@ -157,6 +169,12 @@ class ProjectData(BaseModel):
     project_id: str
     project_name: str = ""
     customer_name: str = ""
+    company_id: str = ""
+    crm_project_id: str | None = None
+    sales_name: str | None = None
+    sales_pts_id: str | None = None
+    sales_pts_username: str | None = None
+    sales_lookup_status: str | None = None
     delivery_stage: str = ""
     stage_status: str = ""
     after_sales_leader: str = ""

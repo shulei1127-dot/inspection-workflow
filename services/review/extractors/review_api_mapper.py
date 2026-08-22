@@ -71,6 +71,8 @@ def map_project_from_graphql(project_id: str, data: dict[str, Any]) -> ProjectDa
         project_id=project_id,
         project_name=project.get("name", ""),
         customer_name=company.get("name", ""),
+        company_id=company.get("id", ""),
+        crm_project_id=project.get("id") or None,
         delivery_stage=_map_delivery_stage(delivery_status),
         stage_status=_map_stage_status(delivery_status),
         after_sales_leader=after_sale.get("name", ""),

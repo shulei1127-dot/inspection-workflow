@@ -866,7 +866,7 @@ async def send_email_from_pre_analysis(
     from services.email_sender import send_email as _send_email
 
     # Build CC: default CC + sales email
-    default_cc = ["jia.chen@chaitin.com", "kai.wu@chaitin.com", "lei.shu@chaitin.com"]
+    default_cc = ["kai.wu@chaitin.com", "lei.shu@chaitin.com"]
     cc_list = list(default_cc)
     sales_name = refreshed.get("sales_name", "")
     if sales_name:
@@ -915,7 +915,13 @@ async def send_email_from_pre_analysis(
     # Update WorkOrder email status
     try:
         from models.work_order import WorkOrder
-        wo = db.query(WorkOrder).filter(WorkOrder.dt_record_id == record_id).first()
+        from models.work_order_sync import WorkOrderSync
+        wo = db.query(WorkOrder).join(
+            WorkOrderSync,
+            WorkOrderSync.work_order_id == WorkOrder.id,
+        ).filter(WorkOrderSync.aitable_record_id == record_id).first()
+        if wo is None:
+            wo = db.query(WorkOrder).filter(WorkOrder.dt_record_id == record_id).first()
         if wo:
             wo.email_trigger_status = "已发送"
             wo.email_sent = "是"
@@ -1008,7 +1014,7 @@ async def preview_email_content(
         email_list = [e.replace("\n", "").replace("\r", "").strip() for e in analysis.emails.replace("、", ",").replace("；", ",").replace("，", ",").split(",") if e.strip() and "@" in e]
 
     # Build CC list
-    default_cc = ["jia.chen@chaitin.com", "kai.wu@chaitin.com", "lei.shu@chaitin.com"]
+    default_cc = ["kai.wu@chaitin.com", "lei.shu@chaitin.com"]
     cc_list = list(default_cc)
     sales_name = refreshed.get("sales_name", "")
     if sales_name:

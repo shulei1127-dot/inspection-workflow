@@ -146,6 +146,12 @@ REGION_PERSON_IN_CHARGE_FIELD_MAP: dict[str, str] = {
 # 主表"交付负责人"用户字段 ID
 MAIN_PERSON_IN_CHARGE_FIELD = "qWDHbYc"
 
+# 主表"销售"用户字段 ID
+SALES_USER_FIELD = "WLigZyI"
+
+# 主表"CRM项目"链接字段 ID
+CRM_PROJECT_FIELD = "zmb66Mo"
+
 # 所有子表统一的"交付分配人"用户字段 ID
 ASSIGNER_USER_FIELD = "19r1LyK"
 
@@ -254,24 +260,38 @@ def compute_project_type(delivery_items: list) -> str | None:
 
 # ── 钉钉用户 ID 解析 ──────────────────────────────────────────
 
-async def _resolve_dingtalk_user_id(name: str) -> str | None:
-    """通过 dws CLI 按姓名搜索钉钉用户 ID。"""
+async def _resolve_dingtalk_user_id(name: str, *, exact: bool = False) -> str | None:
+    """通过 dws CLI 按姓名搜索钉钉用户 ID。
+
+    销售字段使用 exact=True，只有返回结果中的姓名与 PTS 销售完全匹配时才写入，
+    避免同名或模糊搜索命中错误用户。
+    """
     if not name:
         return None
-    if name in _user_id_cache:
-        return _user_id_cache[name]
+    cache_key = f"{name}:{exact}"
+    if cache_key in _user_id_cache:
+        return _user_id_cache[cache_key]
     try:
         result = await _run_dws([
             "contact", "user", "search",
-            "--query", name, "-f", "json",
+            "--query", name, "--format", "json",
         ], timeout=10)
         if isinstance(result, dict) and result.get("success") and result.get("result"):
-            user_id = result["result"][0].get("userId")
+            candidates = result["result"]
+            if exact:
+                candidates = [
+                    user for user in candidates
+                    if user.get("name") == name or user.get("nick") == name
+                ]
+                if len(candidates) != 1:
+                    logger.warning("钉钉销售姓名未精确匹配: name=%s candidates=%d", name, len(candidates))
+                    return None
+            user_id = candidates[0].get("userId")
             if user_id:
-                _user_id_cache[name] = user_id
+                _user_id_cache[cache_key] = user_id
                 return user_id
     except Exception:
-        pass
+        logger.exception("钉钉用户查找失败: name=%s", name)
     return None
 
 
@@ -285,13 +305,16 @@ async def _update_user_fields(
     table_id: str,
     corp_id: str,
     person_in_charge_field: str | None = None,
+    sales_field: str | None = None,
 ) -> None:
-    """创建记录后，单独更新钉钉用户类型字段（交付分配人、交付负责人）。
+    """创建记录后，单独更新钉钉用户类型字段（交付分配人、交付负责人、销售）。
 
     Args:
         person_in_charge_field: "交付负责人"字段ID。主表为 qWDHbYc，
             区域子表各不相同（查 REGION_PERSON_IN_CHARGE_FIELD_MAP）。
             为 None 表示目标表无此字段，跳过写入。
+        sales_field: "销售"字段ID。销售姓名必须从 PTS 公司负责人精确匹配
+            到钉钉用户后才写入；为 None 表示目标表无此字段。
 
     业务规则：如果交付分配人和交付负责人是同一人，只填写交付分配人。
     """
@@ -313,6 +336,14 @@ async def _update_user_fields(
             pic_uid = await _resolve_dingtalk_user_id(result.person_in_charge_name)
             if pic_uid:
                 user_cells[person_in_charge_field] = [{"corpId": corp_id, "userId": pic_uid}]
+
+    if result.sales_name and sales_field:
+        # PTS 的销售字段是客户负责人，必须精确匹配钉钉姓名，避免模糊命中错误人员。
+        sales_uid = await _resolve_dingtalk_user_id(result.sales_name, exact=True)
+        if sales_uid:
+            user_cells[sales_field] = [{"corpId": corp_id, "userId": sales_uid}]
+        else:
+            logger.warning("销售未匹配到钉钉用户，跳过写入: sales_name=%s", result.sales_name)
 
     if user_cells:
         try:
@@ -429,6 +460,9 @@ async def write_audit_to_dingtalk(result: AuditResult) -> dict[str, Any]:
         "PTS交付链接": {"link": pts_url, "text": pts_url},
         "客户名称": result.customer_name or "",
     }
+    if result.crm_project_id:
+        crm_url = f"https://crm.chaitin.net/project/{result.crm_project_id}#base"
+        cells[CRM_PROJECT_FIELD] = {"link": crm_url, "text": crm_url}
     if notes:
         cells["校对备注"] = _sanitize("\n".join(notes))
     if result.service_content:
@@ -460,12 +494,14 @@ async def write_audit_to_dingtalk(result: AuditResult) -> dict[str, Any]:
 
         record_id: str | None = (resp.get("newRecordIds") or [None])[0]
 
-        # 单独更新用户字段（交付分配人、交付负责人）
+        # 单独更新用户字段（交付分配人、交付负责人、销售）
         if record_id:
             await _update_user_fields(
                 record_id, result,
                 base_id=base_id, table_id=table_id,
-                corp_id=corp_id, person_in_charge_field=MAIN_PERSON_IN_CHARGE_FIELD,
+                corp_id=corp_id,
+                person_in_charge_field=MAIN_PERSON_IN_CHARGE_FIELD,
+                sales_field=SALES_USER_FIELD,
             )
 
         return {"success": True, "recordId": record_id}

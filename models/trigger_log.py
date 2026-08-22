@@ -13,6 +13,7 @@ class TriggerLog(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     work_order_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("work_orders.id", ondelete="CASCADE"), nullable=True)
+    aitable_record_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     trigger_type: Mapped[str] = mapped_column(String(64), nullable=False)
     trigger_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     request_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

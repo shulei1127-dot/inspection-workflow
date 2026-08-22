@@ -58,6 +58,40 @@ class SyncAITablePolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lookup, {"pts-1": ["rec-new"]})
         create.assert_awaited_once()
 
+    async def test_previous_month_record_does_not_block_target_month(self) -> None:
+        wo = self.make_work_order()
+        with patch.object(sync_service, "get_settings", return_value=self.settings), \
+             patch.object(dingtalk_client, "create_records", new_callable=AsyncMock,
+                          return_value={"newRecordIds": ["rec-aug"]}) as create:
+            lookup = {("pts-1", "2026-07"): ["rec-jul"]}
+            await sync_service._sync_to_aitable(
+                None,
+                wo,
+                sync_month="2026-08",
+                aitable_lookup=lookup,
+            )
+
+        self.assertEqual(wo.dt_record_id, "rec-aug")
+        self.assertEqual(lookup[("pts-1", "2026-07")], ["rec-jul"])
+        self.assertEqual(lookup[("pts-1", "2026-08")], ["rec-aug"])
+        args = create.await_args_list[0]
+        cells = args.args[0][0]["cells"]
+        self.assertEqual(cells["9OtL7li"], "2026-08-01")
+
+    async def test_same_month_record_is_reused(self) -> None:
+        wo = self.make_work_order()
+        with patch.object(sync_service, "get_settings", return_value=self.settings), \
+             patch.object(dingtalk_client, "create_records", new_callable=AsyncMock) as create:
+            await sync_service._sync_to_aitable(
+                None,
+                wo,
+                sync_month="2026-08",
+                aitable_lookup={("pts-1", "2026-08"): ["rec-aug"]},
+            )
+
+        self.assertEqual(wo.dt_record_id, "rec-aug")
+        create.assert_not_awaited()
+
     async def test_duplicate_links_refuse_to_write(self) -> None:
         wo = self.make_work_order()
         with patch.object(sync_service, "get_settings", return_value=self.settings), \

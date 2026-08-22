@@ -25,6 +25,11 @@ class SingleAuditResponse(BaseModel):
     project_id: str
     project_name: str | None = None
     customer_name: str | None = None
+    company_id: str | None = None
+    crm_project_id: str | None = None
+    sales_name: str | None = None
+    sales_pts_id: str | None = None
+    sales_lookup_status: str | None = None
     conclusion: str  # 通过 / 不通过 / 转人工审核 / error
     region: str | None = None
     delivery_type: str | None = None
@@ -90,6 +95,11 @@ async def audit_single_project(
         project_id=result.get("project_id", project_id),
         project_name=result.get("project_name"),
         customer_name=result.get("customer_name"),
+        company_id=result.get("company_id"),
+        crm_project_id=result.get("crm_project_id"),
+        sales_name=result.get("sales_name"),
+        sales_pts_id=result.get("sales_pts_id"),
+        sales_lookup_status=result.get("sales_lookup_status"),
         conclusion=result.get("conclusion", "error"),
         region=result.get("region"),
         delivery_type=result.get("delivery_type"),
