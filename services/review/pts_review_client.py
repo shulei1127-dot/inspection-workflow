@@ -536,11 +536,15 @@ _AFTER_INFO_INPUT_FIELDS = [
 ]
 
 
-async def update_product_info_license_id(product_info_id: str, license_id: str) -> bool | None:
-    """写回 PTS 产品 License ID（仅更新 license_id 字段）。
+async def update_product_info_license_id(
+    product_info_id: str,
+    license_id: str,
+    license_nature: str | None = None,
+) -> bool | None:
+    """写回 PTS 产品 License 信息（License ID，可选 License 性质）。
 
     为避免 update_product_info 全量覆盖语义导致其它字段丢失，
-    先读取产品原始 after_info，用原字段 + 新 license_id 全量写回。
+    先读取产品原始 after_info，用原字段 + 新 license_id/license_nature 全量写回。
 
     Returns:
         True/False 表示 mutation 返回结果，失败或未配置 token 时返回 None。
@@ -565,6 +569,8 @@ async def update_product_info_license_id(product_info_id: str, license_id: str) 
         if field in raw_after
     }
     payload_input["license_id"] = license_id
+    if license_nature:
+        payload_input["license_nature"] = license_nature
 
     payload = {
         "query": UPDATE_PRODUCT_INFO_MUTATION,
@@ -610,8 +616,8 @@ async def update_product_info_license_id(product_info_id: str, license_id: str) 
 
         result = data.get("data", {}).get("update_product_info")
         logger.info(
-            "update_product_info_license_id writeback: product_info_id=%s, license_id=%s, ok=%s",
-            product_info_id, license_id, result,
+            "update_product_info_license_id writeback: product_info_id=%s, license_id=%s, license_nature=%s, ok=%s",
+            product_info_id, license_id, license_nature, result,
         )
         return bool(result)
 

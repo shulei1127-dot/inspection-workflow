@@ -221,7 +221,9 @@ async def audit_single_project(project_id: str, *, skip_rules: set[int] | None =
         for log_item in license_autofill_logs:
             try:
                 ok = await update_product_info_license_id(
-                    log_item["product_id"], log_item["license_id"],
+                    log_item["product_id"],
+                    log_item["license_id"],
+                    license_nature=log_item.get("filled_license_type") or None,
                 )
                 log_item["writeback"] = "ok" if ok else "failed"
             except Exception as exc:
@@ -413,7 +415,7 @@ def _has_real_device_info(detail) -> bool:
     return False
 
 
-# ── License ID 自动补全辅助函数 ─────────────────────────────────
+# ── License 信息自动补全辅助函数 ─────────────────────────────────
 
 # 产品 License 性质 → 机器码关联 License 的 (purpose, permanent_license) 匹配键
 # 注意: permanent（永久）等同于正式交付-永久
@@ -428,17 +430,28 @@ _LICENSE_NATURE_TO_PURPOSE_PERMANENT: dict[str, tuple[str, bool]] = {
     "formal_delivery_non_permanent_license": ("formal_delivery", False),
 }
 
+# 机器码关联 License (purpose, permanent_license) → 可补全的 License 性质
+# 仅包含允许自动补全的 4 类性质（permanent 归一到 formal_delivery_permanent）
+_PURPOSE_PERMANENT_TO_LICENSE_NATURE: dict[tuple[str, bool], str] = {
+    ("formal_delivery", True): "formal_delivery_permanent",
+    ("formal_delivery", False): "formal_delivery_not_permanent",
+    ("poc", False): "poc_not_permanent",
+}
+
 _REVOKED_STATUSES = {"revoked", "revoking"}
 
 
 async def _autofill_license_id(detail) -> dict[str, Any] | None:
-    """按机器码关联的 License 自动补全产品 License ID。
+    """按机器码关联的 License 自动补全产品 License 信息（性质 + ID）。
 
-    前提：产品填写的 License 性质与机器码关联 License 中最新一条的性质对应。
+    - 产品已填 License 性质：要求其与机器码关联 License 中最新一条的性质对应，
+      仅补全 License ID；
+    - 产品未填 License 性质：从最新一条 License 推导性质，同时补全性质与 License ID。
     仅当 License ID 为空、存在机器码且找到匹配 License 时补全。
 
     Returns:
-        补全成功返回补全信息 dict（含 product_id/license_type/license_id），否则返回 None。
+        补全成功返回补全信息 dict（含 product_id/license_type/filled_license_type/license_id），
+        否则返回 None。
     """
     if detail.is_renewal_record:
         return None
@@ -447,10 +460,6 @@ async def _autofill_license_id(detail) -> dict[str, Any] | None:
 
     machine_code = (detail.machine_code or "").strip()
     if not machine_code or machine_code in _PLACEHOLDER_VALUES:
-        return None
-
-    expected = _LICENSE_NATURE_TO_PURPOSE_PERMANENT.get((detail.license_type or "").strip())
-    if expected is None:
         return None
 
     licenses = await fetch_release_licenses(detail.product_id, machine_code)
@@ -462,14 +471,29 @@ async def _autofill_license_id(detail) -> dict[str, Any] | None:
     if not active:
         return None
 
-    purpose, permanent = expected
     latest = active[0]
-    if latest.get("purpose") != purpose or bool(latest.get("permanent_license")) != permanent:
+    purpose = latest.get("purpose")
+    permanent = bool(latest.get("permanent_license"))
+    derived_nature = _PURPOSE_PERMANENT_TO_LICENSE_NATURE.get((purpose, permanent))
+    if derived_nature is None:
+        # 最新 License 不属于可自动补全的 4 类性质
         return None
 
     license_id = (latest.get("license_id") or "").strip()
     if not license_id:
         return None
+
+    current_nature = (detail.license_type or "").strip()
+    filled_nature = ""
+    if current_nature:
+        # 产品已填性质：必须与最新 License 性质对应才补全
+        expected = _LICENSE_NATURE_TO_PURPOSE_PERMANENT.get(current_nature)
+        if expected is None or (purpose, permanent) != expected:
+            return None
+    else:
+        # 产品未填性质：用最新 License 推导的性质补全
+        detail.license_type = derived_nature
+        filled_nature = derived_nature
 
     detail.license_id = license_id
     return {
@@ -477,4 +501,5 @@ async def _autofill_license_id(detail) -> dict[str, Any] | None:
         "product_category": detail.product_category,
         "license_type": detail.license_type,
         "license_id": license_id,
+        "filled_license_type": filled_nature,
     }
