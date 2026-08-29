@@ -447,7 +447,7 @@ async def _autofill_license_id(detail) -> dict[str, Any] | None:
     - 产品已填 License 性质：要求其与机器码关联 License 中最新一条的性质对应，
       仅补全 License ID；
     - 产品未填 License 性质：从最新一条 License 推导性质，同时补全性质与 License ID。
-    仅当 License ID 为空、存在机器码且找到匹配 License 时补全。
+    仅当 License 性质与 License ID 至少缺一项、存在机器码且找到匹配 License 时补全。
 
     Returns:
         补全成功返回补全信息 dict（含 product_id/license_type/filled_license_type/license_id），
@@ -455,7 +455,11 @@ async def _autofill_license_id(detail) -> dict[str, Any] | None:
     """
     if detail.is_renewal_record:
         return None
-    if detail.license_id and detail.license_id.strip():
+    # 性质与 License ID 都已填，无需补全
+    if (
+        detail.license_id and detail.license_id.strip()
+        and detail.license_type and detail.license_type.strip()
+    ):
         return None
 
     machine_code = (detail.machine_code or "").strip()
