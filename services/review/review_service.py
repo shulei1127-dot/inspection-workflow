@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -440,6 +441,13 @@ _PURPOSE_PERMANENT_TO_LICENSE_NATURE: dict[tuple[str, bool], str] = {
 
 _REVOKED_STATUSES = {"revoked", "revoking"}
 
+_MACHINE_CODE_SEPARATORS = re.compile(r"[、，,;\s]+")
+
+
+def _split_machine_codes(raw: str) -> list[str]:
+    """拆分多机器码（顿号/中文逗号/英文逗号/分号/空白分隔），返回去空后的列表。"""
+    return [mc.strip() for mc in _MACHINE_CODE_SEPARATORS.split(raw) if mc.strip()]
+
 
 async def _autofill_license_id(detail) -> dict[str, Any] | None:
     """按机器码关联的 License 自动补全产品 License 信息（性质 + ID）。
@@ -462,11 +470,17 @@ async def _autofill_license_id(detail) -> dict[str, Any] | None:
     ):
         return None
 
-    machine_code = (detail.machine_code or "").strip()
-    if not machine_code or machine_code in _PLACEHOLDER_VALUES:
+    raw_machine_codes = (detail.machine_code or "").strip()
+    if not raw_machine_codes or raw_machine_codes in _PLACEHOLDER_VALUES:
         return None
 
-    licenses = await fetch_release_licenses(detail.product_id, machine_code)
+    # 多机器码（顿号/逗号/空白分隔）逐个查询，取第一个能查到 License 的机器码
+    licenses = None
+    for machine_code in _split_machine_codes(raw_machine_codes):
+        found = await fetch_release_licenses(detail.product_id, machine_code)
+        if found:
+            licenses = found
+            break
     if not licenses:
         return None
 
