@@ -141,19 +141,19 @@ def _check_hw_sw_info(product: ProductInfo) -> list[str]:
 def _check_license(product: ProductInfo) -> list[str]:
     issues: list[str] = []
     is_old_muyun = _is_muyun_old_version(product)
-    # 主流非关键产品无机器码无法申请License，License ID可以为空
-    exempt_license_id = _is_mainstream_non_key(product) or is_old_muyun
+    # 主流非关键产品（无机器码，无法申请License）和旧版牧云：License 字段整体豁免
+    if _is_mainstream_non_key(product) or is_old_muyun:
+        return issues
 
     if _is_empty(product.license_type):
-        if not is_old_muyun:
-            issues.append("无License性质")
+        issues.append("无License性质")
     elif product.license_type not in VALID_LICENSE_TYPES:
         issues.append('License性质非"正式交付-永久"或"正式交付-非永久"')
 
     is_permanent = product.license_type in ("formal_delivery_permanent", "正式交付-永久", "permanent", "永久")
     if _is_empty(product.license_expiry) and not is_permanent:
         issues.append("无License有效期")
-    if _is_empty(product.license_id) and not exempt_license_id:
+    if _is_empty(product.license_id):
         issues.append("无License ID")
     return issues
 
