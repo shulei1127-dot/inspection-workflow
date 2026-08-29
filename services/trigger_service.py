@@ -136,7 +136,17 @@ async def _call_yunji_dispatch(
             )
         existing = existing_query.first()
         if existing:
-            return {"status": "skipped", "message": "Already dispatched successfully"}
+            existing_body = existing.response_body or {}
+            if existing_body.get("demandId"):
+                return {"status": "skipped", "message": "Already dispatched successfully"}
+            # 历史"假成功"日志（无需求 ID）不阻塞重试：标记为失败，由监控周期自动重试
+            logger.warning(
+                "发现无 demandId 的假成功派单日志，标记失败并允许重试: trigger_log=%s, aitable_record_id=%s",
+                existing.id, aitable_record_id,
+            )
+            existing.status = "failed"
+            existing.error_message = "历史成功日志无需求 ID，标记失败以触发重试"
+            db.commit()
 
     # Create trigger log
     log = TriggerLog(
@@ -161,6 +171,8 @@ async def _call_yunji_dispatch(
 
         demand_id = result.get("demandId", "")
         order_id = result.get("orderId", "")
+        if not demand_id:
+            raise RuntimeError("云集派单返回空 demandId，无法确认需求已创建")
 
         log.status = "success"
         log.response_body = result

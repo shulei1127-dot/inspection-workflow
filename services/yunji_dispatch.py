@@ -7,6 +7,7 @@ Migrated from server.js — replaces Puppeteer-based approach:
 """
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -360,7 +361,13 @@ async def create_yunji_requirement(
     result = await yunji_client.yunji_api(
         "POST", "/api/admin/requirement/create", common_body
     )
-    demand_id = str(result.get("id", ""))
+    logger.info("云集创建需求响应: %s", json.dumps(result, ensure_ascii=False)[:800])
+    demand_id = str(result.get("id", "")) if isinstance(result, dict) else ""
+    if not demand_id:
+        raise RuntimeError(
+            "云集创建需求失败: 响应未返回需求 ID (demandId 为空)，响应=%s"
+            % json.dumps(result, ensure_ascii=False)[:500]
+        )
     logger.info("需求创建成功! ID=%s", demand_id)
 
     # Get order ID
