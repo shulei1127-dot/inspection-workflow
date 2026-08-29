@@ -276,13 +276,8 @@ async def audit_single_project(project_id: str, *, skip_rules: set[int] | None =
     except Exception as exc:
         logger.warning("区域/类型计算失败: project_id=%s, error=%s", project_id, exc)
 
-    # Step 4: 非关键产品 → "转人工审核" 覆盖
-    has_key_product = any(is_key_product(p) for p in product_details)
-    if not has_key_product and audit_result.conclusion == "通过":
-        audit_result.conclusion = "转人工审核"
-        product_names = {extract_short_product_name(p.product_category or "") for p in product_details}
-        if product_names:
-            audit_result.manual_review_reason = "非关键产品（" + "、".join(sorted(product_names)) + "），需人工确认"
+    # Step 4: 非关键产品 → 售后有效服务期全部非空则直接通过，否则转人工审核
+    _apply_non_key_manual_review(audit_result, product_details)
 
     # Step 5: 钉钉写入
     settings = get_settings()
@@ -396,6 +391,33 @@ async def list_review_logs(
 # ── 续保标记辅助函数 ────────────────────────────────────────
 
 _PLACEHOLDER_VALUES = {"1", "2", "NA", "N/A", "无", "---", "", "undefined", "null"}
+
+
+def _has_valid_after_sales_period(detail) -> bool:
+    """售后有效服务期是否非空（排除占位符）。"""
+    period = (detail.after_sales_service_period or "").strip()
+    return bool(period) and period not in _PLACEHOLDER_VALUES
+
+
+def _apply_non_key_manual_review(audit_result: AuditResult, product_details: list) -> None:
+    """非关键产品兜底：无关键产品且规则全通过时，售后有效服务期全部非空则直接通过，否则转人工审核。"""
+    if audit_result.conclusion != "通过":
+        return
+    if any(is_key_product(p) for p in product_details):
+        return
+
+    missing_period_products = [
+        extract_short_product_name(p.product_category or "") or p.product_id
+        for p in product_details
+        if not _has_valid_after_sales_period(p)
+    ]
+    if not product_details or missing_period_products:
+        audit_result.conclusion = "转人工审核"
+        product_names = {extract_short_product_name(p.product_category or "") for p in product_details} or {"未知产品"}
+        audit_result.manual_review_reason = (
+            "非关键产品（" + "、".join(sorted(product_names))
+            + "）售后有效服务期缺失，需人工确认"
+        )
 
 
 def _has_real_device_info(detail) -> bool:
