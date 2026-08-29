@@ -27,10 +27,12 @@ from services.review.pts_review_client import (
     submit_review,
     update_product_info_license_id,
 )
+from services.dingtalk_notifier import is_workday_today
 from services.review.review_dingtalk import (
     compute_delivery_type,
     compute_project_type,
     compute_region,
+    flush_region_reject_notices,
     write_audit_to_dingtalk,
 )
 
@@ -60,6 +62,14 @@ async def run_review_pipeline(
             "reason": "review_real_execution_enabled 未启用",
         }
 
+    # 国家法定节假日/周末不执行审核，仅工作日执行
+    if not is_workday_today():
+        logger.info("法定节假日或周末，跳过交付转售后审核")
+        return {
+            "status": "skipped",
+            "reason": "法定节假日或周末，跳过交付转售后审核",
+        }
+
     # Step 1: 获取待审核项目列表
     try:
         after_sale_ids = None
@@ -86,7 +96,7 @@ async def run_review_pipeline(
 
     for project in projects:
         try:
-            result = await audit_single_project(project.project_id)
+            result = await audit_single_project(project.project_id, notify_rejects=False)
             # 保存审核日志
             _save_audit_log(db, project.project_id, project.project_name, project.customer_name, result, trigger_source)
             db.commit()
@@ -132,10 +142,21 @@ async def run_review_pipeline(
         summary["total"], summary["passed"], summary["rejected"], summary["manual"], summary["errors"],
     )
 
+    # 审核拒绝项目合并为一条钉钉通知发送
+    try:
+        await flush_region_reject_notices()
+    except Exception as exc:
+        logger.warning("审核拒绝通知合并发送失败: %s", exc)
+
     return {"status": "success", **summary, "results": results}
 
 
-async def audit_single_project(project_id: str, *, skip_rules: set[int] | None = None) -> dict[str, Any]:
+async def audit_single_project(
+    project_id: str,
+    *,
+    skip_rules: set[int] | None = None,
+    notify_rejects: bool = True,
+) -> dict[str, Any]:
     """对单个项目执行完整审核流程。
 
     Args:
@@ -298,6 +319,13 @@ async def audit_single_project(project_id: str, *, skip_rules: set[int] | None =
         pts_review_result = await submit_review(project_id, True, reason)
     elif audit_result.conclusion == "不通过":
         pts_review_result = {"skipped": True, "reason": "拒绝项目需人工审核后手动操作"}
+
+    # 单项目审核：立即合并发送拒绝通知（流水线统一在 run_review_pipeline 末尾发送）
+    if notify_rejects:
+        try:
+            await flush_region_reject_notices()
+        except Exception as exc:
+            logger.warning("审核拒绝通知发送失败: project_id=%s, error=%s", project_id, exc)
 
     return {
         "project_id": project_id,

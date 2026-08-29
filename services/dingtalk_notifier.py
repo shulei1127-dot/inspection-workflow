@@ -56,6 +56,11 @@ def get_digest_data() -> dict[str, dict]:
 # ── Workday check ────────────────────────────────────────────────
 
 
+def is_workday_today() -> bool:
+    """公开封装：今天（Asia/Shanghai）是否为工作日（法定节假日/周末返回 False）。"""
+    return _is_workday_today()
+
+
 def _is_workday_today() -> bool:
     """Check if today (Asia/Shanghai) is a workday.
 
@@ -352,6 +357,10 @@ async def notify_review_pipeline(result: dict, error: str | None = None) -> bool
             "❌ 交付转售后审核失败",
             f"错误信息：{error}",
         )
+
+    if result.get("status") == "skipped":
+        logger.info("Review pipeline skipped: %s", result.get("reason"))
+        return False
 
     total = result.get("total", 0)
     passed = result.get("passed", 0)

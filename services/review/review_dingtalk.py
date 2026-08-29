@@ -513,23 +513,47 @@ async def write_audit_to_dingtalk(result: AuditResult) -> dict[str, Any]:
         if result.conclusion == "不通过" and result.region:
             try:
                 region_result = await _write_to_region_sheet(result, base_id=base_id, corp_id=corp_id)
-                # 写入区域表成功后，发钉钉通知
+                # 写入区域表成功后，加入缓冲，由流水线结束后合并为一条通知
                 if region_result.get("success"):
-                    await _notify_region_reject(result)
+                    _buffer_region_reject(result)
             except Exception as e:
                 logger.warning("Dingtalk region sheet write failed (main record OK): %s", e)
 
 
 # ── 辅助函数 ─────────────────────────────────────────────────
 
-async def _notify_region_reject(result: AuditResult) -> None:
-    """区域表写入成功后，发钉钉通知简要提醒。"""
+# ── 审核拒绝通知缓冲（合并为一条发送） ────────────────────────
+_region_reject_buffer: list[dict[str, str]] = []
+
+
+def _buffer_region_reject(result: AuditResult) -> None:
+    """将审核拒绝项目加入缓冲，流水线结束后合并为一条通知发送。"""
+    _region_reject_buffer.append({
+        "project_name": result.project_name or "",
+        "customer_name": result.customer_name or "",
+        "region": result.region or "",
+    })
+
+
+async def flush_region_reject_notices() -> bool:
+    """将缓冲的审核拒绝项目合并成一条钉钉通知发送，并清空缓冲。"""
+    if not _region_reject_buffer:
+        return False
+    items = list(_region_reject_buffer)
+    _region_reject_buffer.clear()
+
     from services.dingtalk_notifier import send_dingtalk_notification
 
+    lines = [
+        f"- {it['project_name'] or it['customer_name'] or '未知项目'}（{it['region']}）"
+        for it in items
+    ]
     title = "🚫 审核拒绝项目已写入钉钉文档"
-    content = f"项目「{result.customer_name or '未知客户'}」审核不通过，已写入 **{result.region}** 交付转售后回访进展数据表。"
-
-    await send_dingtalk_notification(title, content)
+    content = (
+        f"本次审核共 {len(items)} 个项目审核不通过，已写入对应区域交付转售后回访进展数据表：\n\n"
+        + "\n".join(lines)
+    )
+    return await send_dingtalk_notification(title, content)
 
 
 def _now_iso_cn() -> str:
