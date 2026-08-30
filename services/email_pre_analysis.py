@@ -8,6 +8,7 @@ Key design:
 """
 
 import logging
+import re
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -31,6 +32,20 @@ _PRODUCT_SHORT_NAMES = {
 
 _PRODUCT_KEYWORDS = ["雷池", "洞鉴", "谛听", "牧云", "万象"]
 
+# 平台级运行状态巡检类产品（报告无"X台"设备数量，只有探针在线/离线数）
+_PLATFORM_PRODUCT_KEYWORDS = ("牧云", "CloudWalker", "cloudwalker", "云工作负载")
+
+# 产品显示名兜底（优先取 AITable 产品名称字段中匹配的段，例如"云工作负载保护平台（牧云）"）
+_PRODUCT_FULL_NAMES = {
+    "牧云": "云工作负载保护平台（牧云）",
+    "CloudWalker": "云工作负载保护平台（牧云）",
+    "雷池": "下一代Web应用防火墙（雷池20系列）",
+    "洞鉴": "风险评估系统（洞鉴）",
+    "谛听": "主动威胁欺骗防御系统（谛听）",
+    "万象": "安全分析与运营管理平台（万象）",
+    "全悉": "流量威胁检测响应系统（全悉）",
+}
+
 
 def _short_product_name(name: str) -> str:
     """Return short product name for email subject.
@@ -48,6 +63,32 @@ def _short_product_name(name: str) -> str:
         if name.startswith(full) or full in name:
             return short
     return name
+
+
+def _resolve_full_product_name(short_kw: str, aitable_field: str = "") -> str:
+    """Resolve full display product name.
+
+    Prefers the segment of the AITable 产品名称 multi-product field that contains
+    the short keyword, e.g. short "牧云" + "云工作负载保护平台（牧云）、主动威胁欺骗防御系统（谛听）"
+    → "云工作负载保护平台（牧云）". Falls back to a static full-name map.
+    """
+    if aitable_field and short_kw:
+        for seg in re.split(r"[、，,;/+]+", aitable_field):
+            seg = seg.strip()
+            if seg and short_kw in seg:
+                return seg
+    return _PRODUCT_FULL_NAMES.get(short_kw, "")
+
+
+def _derive_platform_quantity(summary: str) -> str:
+    """Derive inspected probe count for platform run-state reports (牧云/CloudWalker)
+    when the AI didn't extract a quantity, e.g. "探针在线973个、离线33个" → "1006个探针"."""
+    if not summary:
+        return ""
+    m = re.search(r"在线[^\d]*?(\d+)[^\d]*?离线[^\d]*?(\d+)", summary)
+    if not m:
+        return ""
+    return f"{int(m.group(1)) + int(m.group(2))}个探针"
 
 
 def _merge_multi_report_results(ai_infos: list[dict]) -> dict:
@@ -144,7 +185,7 @@ def _merge_multi_report_results(ai_infos: list[dict]) -> dict:
                 # Duplicates detected — use single quantity
                 merged_qty = qty_list[0] if qty_list else ""
             else:
-                merged_qty = _merge_quantities(qty_list)
+                merged_qty = _merge_quantities(qty_list) if qty_list else ""
 
             if merged_qty:
                 products_with_quantity.append(f"{merged_qty}{prod}")
@@ -179,6 +220,9 @@ def _merge_quantities(quantities: list[str]) -> str:
     Handles Chinese numerals (一～十) and Arabic digits, preserves unit suffix.
     """
     import re
+
+    if not quantities:
+        return ""
 
     # Map Chinese numerals to numbers
     CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
@@ -711,6 +755,76 @@ async def refresh_aitable_fields_for_send(
     return refreshed_fields
 
 
+def _compose_email_content(
+    customer_name: str,
+    product_name: str,
+    aitable_product_name: str,
+    inspection_date: str,
+    quantity: str,
+    summaries: list[dict] | None,
+    analysis_summary: str,
+) -> dict:
+    """Shared email composition for send & preview.
+
+    - Subject uses the short product name (牧云/谛听/雷池...).
+    - Body/preview display the full product name (e.g. 云工作负载保护平台（牧云）)
+      resolved from the AITable 产品名称 field, falling back to a static map.
+    - Platform run-state reports (牧云/CloudWalker) without an AI quantity get a
+      derived probe count (e.g. "1006个探针") for the preview 数量 field.
+    """
+    consolidated, quantity = _consolidate_email_data(summaries, quantity)
+
+    if consolidated and len(consolidated) > 1:
+        summary = "\n\n".join(
+            f"【{s['product']}】\n{s['summary']}" for s in consolidated if s.get("summary")
+        )
+    elif consolidated and len(consolidated) == 1:
+        summary = consolidated[0].get("summary", "") or analysis_summary or ""
+    else:
+        summary = analysis_summary or ""
+
+    short_product = _short_product_name(product_name)
+    full_product = _resolve_full_product_name(short_product, aitable_product_name)
+    date_display = (inspection_date or "近日").replace("-", ".")
+    subject = f"【长亭科技巡检报告】{customer_name}{short_product}巡检报告-{date_display}"
+
+    derived_quantity = ""
+    if not quantity and short_product in _PLATFORM_PRODUCT_KEYWORDS:
+        derived_quantity = _derive_platform_quantity(summary)
+
+    # Build quantity display for the body: "1台谛听" / "云工作负载保护平台（牧云）"
+    if quantity:
+        if any(kw in quantity for kw in _PRODUCT_KEYWORDS):
+            qty_display = quantity
+        else:
+            qty_display = f"{quantity}{short_product or product_name}"
+    elif full_product:
+        qty_display = full_product
+    elif product_name:
+        qty_display = short_product or product_name
+    else:
+        qty_display = "相关设备"
+
+    body = (
+        f"尊敬的客户，您好，\n"
+        f"\n"
+        f"非常感谢对长亭科技的信任！本司于 {inspection_date or '近日'} 对贵司的 {qty_display} 进行了一次全面的巡检，结果如下：\n"
+        f"\n"
+        f"{summary or '详见附件巡检报告。'}\n"
+        f"\n"
+        f"详细巡检报告见附件，请查收！\n"
+        f"\n"
+        f"后续如有问题欢迎通过【长亭科技售后服务中心】微信服务号-【人工服务】联系我们～"
+    )
+
+    return {
+        "subject": subject,
+        "body": body,
+        "display_product_name": full_product or product_name or short_product or "产品",
+        "display_quantity": derived_quantity or qty_display,
+    }
+
+
 async def send_email_from_pre_analysis(
     db: Session,
     record_id: str,
@@ -823,46 +937,17 @@ async def send_email_from_pre_analysis(
     inspection_date = analysis.inspection_date or ""
     quantity = analysis.quantity or ""
 
-    # Consolidate summaries: merge duplicate products, dedup, re-aggregate quantity
-    summaries, quantity = _consolidate_email_data(analysis.summaries, quantity)
-
-    # Build summary: multi-product → segmented by product; single → direct
-    if summaries and len(summaries) > 1:
-        summary = "\n\n".join(
-            f"【{s['product']}】\n{s['summary']}" for s in summaries if s.get("summary")
-        )
-    elif summaries and len(summaries) == 1:
-        summary = summaries[0].get("summary", "") or analysis.summary or ""
-    else:
-        summary = analysis.summary or ""
-
-    short_product = _short_product_name(product_name)
-    date_display = (inspection_date or "近日").replace("-", ".")
-    subject = f"【长亭科技巡检报告】{customer_name}{short_product}巡检报告-{date_display}"
-
-    # Build quantity display: "2台雷池" / "雷池" (no quantity)
-    # If quantity already contains product names (e.g. "1台洞鉴、2个探针谛听"), use it directly
-    if quantity:
-        if any(kw in quantity for kw in _PRODUCT_KEYWORDS):
-            qty_display = quantity
-        else:
-            qty_display = f"{quantity}{short_product or product_name}"
-    elif product_name:
-        qty_display = short_product or product_name
-    else:
-        qty_display = "相关设备"
-
-    body = (
-        f"尊敬的客户，您好，\n"
-        f"\n"
-        f"非常感谢对长亭科技的信任！本司于 {inspection_date or '近日'} 对贵司的 {qty_display} 进行了一次全面的巡检，结果如下：\n"
-        f"\n"
-        f"{summary or '详见附件巡检报告。'}\n"
-        f"\n"
-        f"详细巡检报告见附件，请查收！\n"
-        f"\n"
-        f"后续如有问题欢迎通过【长亭科技售后服务中心】微信服务号-【人工服务】联系我们～"
+    composed = _compose_email_content(
+        customer_name=customer_name,
+        product_name=product_name,
+        aitable_product_name=refreshed.get("product_name") or "",
+        inspection_date=inspection_date,
+        quantity=quantity,
+        summaries=analysis.summaries,
+        analysis_summary=analysis.summary or "",
     )
+    subject = composed["subject"]
+    body = composed["body"]
 
     # 5. Send email
     from services.email_sender import send_email as _send_email
@@ -1035,43 +1120,17 @@ async def preview_email_content(
     inspection_date = analysis.inspection_date or ""
     quantity = analysis.quantity or ""
 
-    # Consolidate summaries: merge duplicate products, dedup, re-aggregate quantity
-    summaries, quantity = _consolidate_email_data(analysis.summaries, quantity)
-
-    if summaries and len(summaries) > 1:
-        summary = "\n\n".join(
-            f"【{s['product']}】\n{s['summary']}" for s in summaries if s.get("summary")
-        )
-    elif summaries and len(summaries) == 1:
-        summary = summaries[0].get("summary", "") or analysis.summary or ""
-    else:
-        summary = analysis.summary or ""
-
-    short_product = _short_product_name(product_name)
-    date_display = (inspection_date or "近日").replace("-", ".")
-    subject = f"【长亭科技巡检报告】{customer_name}{short_product}巡检报告-{date_display}"
-
-    if quantity:
-        if any(kw in quantity for kw in _PRODUCT_KEYWORDS):
-            qty_display = quantity
-        else:
-            qty_display = f"{quantity}{short_product or product_name}"
-    elif product_name:
-        qty_display = short_product or product_name
-    else:
-        qty_display = "相关设备"
-
-    body = (
-        f"尊敬的客户，您好，\n"
-        f"\n"
-        f"非常感谢对长亭科技的信任！本司于 {inspection_date or '近日'} 对贵司的 {qty_display} 进行了一次全面的巡检，结果如下：\n"
-        f"\n"
-        f"{summary or '详见附件巡检报告。'}\n"
-        f"\n"
-        f"详细巡检报告见附件，请查收！\n"
-        f"\n"
-        f"后续如有问题欢迎通过【长亭科技售后服务中心】微信服务号-【人工服务】联系我们～"
+    composed = _compose_email_content(
+        customer_name=customer_name,
+        product_name=product_name,
+        aitable_product_name=refreshed.get("product_name") or "",
+        inspection_date=inspection_date,
+        quantity=quantity,
+        summaries=analysis.summaries,
+        analysis_summary=analysis.summary or "",
     )
+    subject = composed["subject"]
+    body = composed["body"]
 
     # Get attachment filenames from AITable
     from core.config import get_settings
@@ -1111,8 +1170,8 @@ async def preview_email_content(
         "cc_emails": cc_list,
         "attachments": attachment_filenames,
         "customer_name": customer_name,
-        "product_name": product_name,
+        "product_name": composed["display_product_name"],
         "inspection_date": inspection_date,
-        "quantity": qty_display,
+        "quantity": composed["display_quantity"],
         "sales_name": sales_name,
     }

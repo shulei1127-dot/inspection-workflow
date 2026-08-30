@@ -115,6 +115,22 @@ async def re_extract_pdf_info(file_ids: str = Form(...)):
 
         content = stored["content"]
         filename = stored["filename"]
+        # Only PDF reports are AI-analyzed (Word docs skipped, same as pre-analysis)
+        if not filename.lower().endswith(".pdf"):
+            results.append({
+                "file_id": fid,
+                "filename": filename,
+                "info": {
+                    "customer_name": "",
+                    "product_name": "",
+                    "inspection_date": "",
+                    "quantity": "",
+                    "emails": [],
+                    "summary": "",
+                },
+                "ai_error": None,
+            })
+            continue
         info = None
         ai_error = None
         try:
@@ -280,6 +296,10 @@ async def fetch_aitable_attachments(record_id: str):
     for fid in file_ids:
         content = _upload_store[fid]["content"]
         filename = _upload_store[fid]["filename"]
+        # Only PDF reports are AI-analyzed (Word docs skipped, same as pre-analysis)
+        if not filename.lower().endswith(".pdf"):
+            logger.info("Skipping non-PDF attachment for AI analysis: %s", filename)
+            continue
         try:
             doc = fitz.open(stream=content, filetype="pdf")
             text = ""
