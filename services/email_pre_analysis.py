@@ -808,16 +808,15 @@ def _compose_email_content(
                 quantity = f"{platform_count}台"
                 derived_quantity = quantity
 
-    # Build quantity display for the body: "1台谛听" / "1台云工作负载保护平台（牧云）"
+    # Build quantity display for the body: "1台谛听" / "1 台牧云"
     if quantity:
         if any(kw in quantity for kw in _PRODUCT_KEYWORDS):
             qty_display = quantity
-        elif short_product in _PLATFORM_PRODUCT_KEYWORDS and full_product:
-            qty_display = f"{quantity}{full_product}"
+        elif short_product in _PLATFORM_PRODUCT_KEYWORDS:
+            # 平台类正文：如 "1台" → "1 台牧云"
+            qty_display = re.sub(r"^(\d+)(台)$", r"\1 台", quantity) + (short_product or product_name)
         else:
             qty_display = f"{quantity}{short_product or product_name}"
-    elif full_product:
-        qty_display = full_product
     elif product_name:
         qty_display = short_product or product_name
     else:
@@ -826,7 +825,7 @@ def _compose_email_content(
     body = (
         f"尊敬的客户，您好，\n"
         f"\n"
-        f"非常感谢对长亭科技的信任！本司于 {inspection_date or '近日'} 对贵司的 {qty_display} 进行了一次全面的巡检，结果如下：\n"
+        f"非常感谢对长亭科技的信任！本司于 {inspection_date or '近日'} 对贵司的 {qty_display}进行了一次全面的巡检，结果如下：\n"
         f"\n"
         f"{summary or '详见附件巡检报告。'}\n"
         f"\n"
