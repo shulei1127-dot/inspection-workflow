@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     inspection_closure_aitable_writeback_enabled: bool = False
     inspection_closure_manual_notify_enabled: bool = False
     dt_dispatch_report_link_uploaded_field_id: str = ""
-    inspection_closure_whitelist: str = ""  # comma-separated AITable record IDs
+    inspection_closure_whitelist: str = ""  # 留空=全量处理；非空=仅处理白名单记录（应急限制开关）
     inspection_closure_default_assignee_id: str = "669723ae2f6e1a862a49ef16"
     inspection_closure_upload_max_retries: int = 3
     inspection_closure_stage_max_attempts: int = 10
