@@ -9,6 +9,7 @@ Core functionality:
 import json
 import logging
 import os
+import re
 import smtplib
 from email.header import Header
 from email.mime.application import MIMEApplication
@@ -55,6 +56,7 @@ def _clean_ai_summary(summary) -> str:
 
     - summary 可能是字符串或字符串列表
     - 若包含"设备巡检详情"标记或"省略"占位文字，只保留其前面的概况部分
+    - 去掉"3.1 巡检概况""3.2 巡检详情"等章节标题行
     """
     if isinstance(summary, list):
         summary = "\n".join(str(s) for s in summary if s)
@@ -63,8 +65,15 @@ def _clean_ai_summary(summary) -> str:
     for marker in ("以下内容为具体设备巡检详情", "（此处省略", "(此处省略", "此处省略部分内容"):
         idx = summary.find(marker)
         if idx > 0:
-            return summary[:idx].strip()
-    return summary.strip()
+            summary = summary[:idx]
+            break
+    lines = [
+        ln
+        for ln in summary.split("\n")
+        if not re.match(r"^\s*\d+(\.\d+)*\s*(巡检概况|巡检详情|巡检结果分析和处理建议|巡检结论)\s*$", ln.strip())
+    ]
+    cleaned = "\n".join(lines).strip()
+    return cleaned or summary.strip()
 
 
 def extract_info_with_ai(text: str) -> tuple[dict | None, str | None]:
