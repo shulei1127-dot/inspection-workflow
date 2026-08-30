@@ -50,6 +50,23 @@ def _get_name_pinyin(name: str) -> str:
     return ""
 
 
+def _clean_ai_summary(summary) -> str:
+    """兜底清理 AI 摘要：避免设备明细/省略占位文字进入邮件正文。
+
+    - summary 可能是字符串或字符串列表
+    - 若包含"设备巡检详情"标记或"省略"占位文字，只保留其前面的概况部分
+    """
+    if isinstance(summary, list):
+        summary = "\n".join(str(s) for s in summary if s)
+    if not isinstance(summary, str):
+        return ""
+    for marker in ("以下内容为具体设备巡检详情", "（此处省略", "(此处省略", "此处省略部分内容"):
+        idx = summary.find(marker)
+        if idx > 0:
+            return summary[:idx].strip()
+    return summary.strip()
+
+
 def extract_info_with_ai(text: str) -> tuple[dict | None, str | None]:
     """Use ZhipuAI to extract structured info from inspection report text.
 
@@ -69,7 +86,7 @@ def extract_info_with_ai(text: str) -> tuple[dict | None, str | None]:
 3. 巡检时间（格式化为 YYYY-MM-DD）。注意：PDF中可能包含模板创建日期（通常出现在页眉或封面副标题，格式较旧如2024年），这不是实际巡检时间。实际巡检时间通常出现在报告标题附近或正文首段，且应是最近的日期。请优先选择标题旁或正文首段出现的日期，而非页眉/封面中较旧的模板日期。
 4. 巡检数量（如"1套"、"4台"等，保留数字和单位）
 5. 客户邮箱（可能有多个，也可能没有）
-6. 巡检总结：提取报告中"事件记录/巡检结果及建议"或"巡检结论"部分的完整段落内容。该内容通常出现在报告末尾的"设备巡检信息汇总"表格中，是"事件记录"行对应"巡检结果及建议"列的文字，包含编号列表（如1、2、3等）的具体巡检发现和建议。如果找不到该部分，则提取"巡检结果概要"章节的内容。不要只提取"此次共巡检了X台设备"这类一句话概括，必须保留原文的编号列表格式和换行，不要合并为一段连续文字。
+6. 巡检总结：优先提取报告中"事件记录/巡检结果及建议"或"巡检结论"部分的完整段落内容，该部分通常包含编号列表（如1、2、3等）的具体巡检发现和建议，必须保留原文的编号列表格式和换行。如果报告中没有这类编号的巡检发现/建议列表，则只返回"巡检概况"的一句话概括（如"此次共巡检了X台设备，系统当前运行状态良好……"），不要把设备明细（部署模式、机器码、IP地址、产品版本等逐项信息）写进summary，更不要输出"（此处省略部分内容）"之类的截断占位文字。
 
 请严格按以下 JSON 格式返回，不要包含任何其他内容：
 {{"customer_name": "","product_name": "","inspection_date": "","quantity": "","emails": [],"summary": ""}}
@@ -90,7 +107,10 @@ def extract_info_with_ai(text: str) -> tuple[dict | None, str | None]:
             if content.startswith("json"):
                 content = content[4:]
         content = content.strip()
-        return json.loads(content), None
+        data = json.loads(content)
+        if isinstance(data, dict) and data.get("summary"):
+            data["summary"] = _clean_ai_summary(data["summary"])
+        return data, None
     except Exception as e:
         return None, f"AI 提取失败: {e}"
 
