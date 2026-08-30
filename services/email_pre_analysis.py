@@ -33,7 +33,15 @@ _PRODUCT_SHORT_NAMES = {
 _PRODUCT_KEYWORDS = ["雷池", "洞鉴", "谛听", "牧云", "万象"]
 
 # 平台级运行状态巡检类产品（报告无"X台"设备数量，只有探针在线/离线数）
-_PLATFORM_PRODUCT_KEYWORDS = ("牧云", "CloudWalker", "cloudwalker", "云工作负载")
+_PLATFORM_PRODUCT_KEYWORDS = ("牧云", "cloudwalker", "云工作负载")
+
+
+def _is_platform_product(short_name: str) -> bool:
+    """Whether a short product name belongs to the platform run-state class (牧云/CloudWalker)."""
+    if not short_name:
+        return False
+    lowered = short_name.lower()
+    return any(kw in lowered for kw in _PLATFORM_PRODUCT_KEYWORDS)
 
 # 产品显示名兜底（优先取 AITable 产品名称字段中匹配的段，例如"云工作负载保护平台（牧云）"）
 _PRODUCT_FULL_NAMES = {
@@ -78,17 +86,6 @@ def _resolve_full_product_name(short_kw: str, aitable_field: str = "") -> str:
             if seg and short_kw in seg:
                 return seg
     return _PRODUCT_FULL_NAMES.get(short_kw, "")
-
-
-def _derive_platform_quantity(summary: str) -> str:
-    """Derive inspected probe count for platform run-state reports (牧云/CloudWalker)
-    when the AI didn't extract a quantity, e.g. "探针在线973个、离线33个" → "1006个探针"."""
-    if not summary:
-        return ""
-    m = re.search(r"在线[^\d]*?(\d+)[^\d]*?离线[^\d]*?(\d+)", summary)
-    if not m:
-        return ""
-    return f"{int(m.group(1)) + int(m.group(2))}个探针"
 
 
 def _merge_multi_report_results(ai_infos: list[dict]) -> dict:
@@ -658,7 +655,15 @@ async def _analyze_single_record(
     analysis.customer_name = merged.get("customer_name") or analysis.customer_name
     analysis.product_name = merged.get("product_name") or analysis.product_name
     analysis.inspection_date = ai_infos[0].get("inspection_date") if ai_infos else None
-    analysis.quantity = merged.get("quantity") or analysis.quantity
+    # 平台级巡检（牧云/CloudWalker）：数量=被巡检的管理端数量=巡检报告份数（如"1台"）
+    platform_infos = [
+        i for i in ai_infos
+        if _is_platform_product(_short_product_name(i.get("product_name", "")))
+    ]
+    if platform_infos and len(platform_infos) == len(ai_infos):
+        analysis.quantity = f"{len(platform_infos)}台"
+    else:
+        analysis.quantity = merged.get("quantity") or analysis.quantity
     ai_emails = merged.get("emails", [])
     if ai_emails:
         analysis.emails = ", ".join(ai_emails)
@@ -763,14 +768,16 @@ def _compose_email_content(
     quantity: str,
     summaries: list[dict] | None,
     analysis_summary: str,
+    ai_info: dict | list | None = None,
 ) -> dict:
     """Shared email composition for send & preview.
 
     - Subject uses the short product name (牧云/谛听/雷池...).
     - Body/preview display the full product name (e.g. 云工作负载保护平台（牧云）)
       resolved from the AITable 产品名称 field, falling back to a static map.
-    - Platform run-state reports (牧云/CloudWalker) without an AI quantity get a
-      derived probe count (e.g. "1006个探针") for the preview 数量 field.
+    - Platform run-state reports (牧云/CloudWalker): the inspected quantity is the
+      number of management ends, i.e. the number of inspection reports (e.g. "1台"),
+      derived from the consolidated summaries for the preview 数量 field.
     """
     consolidated, quantity = _consolidate_email_data(summaries, quantity)
 
@@ -788,14 +795,25 @@ def _compose_email_content(
     date_display = (inspection_date or "近日").replace("-", ".")
     subject = f"【长亭科技巡检报告】{customer_name}{short_product}巡检报告-{date_display}"
 
+    # 平台级巡检（牧云/CloudWalker）：数量=被巡检的管理端数量=巡检报告份数（如"1台"）
     derived_quantity = ""
-    if not quantity and short_product in _PLATFORM_PRODUCT_KEYWORDS:
-        derived_quantity = _derive_platform_quantity(summary)
+    if short_product in _PLATFORM_PRODUCT_KEYWORDS:
+        infos = ai_info if isinstance(ai_info, list) else ([ai_info] if ai_info else [])
+        if infos:
+            platform_count = sum(
+                1 for i in infos
+                if _is_platform_product(_short_product_name(i.get("product_name", "")))
+            )
+            if platform_count and platform_count == len(infos):
+                quantity = f"{platform_count}台"
+                derived_quantity = quantity
 
-    # Build quantity display for the body: "1台谛听" / "云工作负载保护平台（牧云）"
+    # Build quantity display for the body: "1台谛听" / "1台云工作负载保护平台（牧云）"
     if quantity:
         if any(kw in quantity for kw in _PRODUCT_KEYWORDS):
             qty_display = quantity
+        elif short_product in _PLATFORM_PRODUCT_KEYWORDS and full_product:
+            qty_display = f"{quantity}{full_product}"
         else:
             qty_display = f"{quantity}{short_product or product_name}"
     elif full_product:
@@ -945,6 +963,7 @@ async def send_email_from_pre_analysis(
         quantity=quantity,
         summaries=analysis.summaries,
         analysis_summary=analysis.summary or "",
+        ai_info=analysis.ai_info,
     )
     subject = composed["subject"]
     body = composed["body"]
@@ -1128,6 +1147,7 @@ async def preview_email_content(
         quantity=quantity,
         summaries=analysis.summaries,
         analysis_summary=analysis.summary or "",
+        ai_info=analysis.ai_info,
     )
     subject = composed["subject"]
     body = composed["body"]
