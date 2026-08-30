@@ -817,7 +817,9 @@ async def send_email_from_pre_analysis(
 
     # 4. Compose email content using pre-analyzed AI info
     customer_name = refreshed.get("customer_name") or analysis.customer_name or ""
-    product_name = refreshed.get("product_name") or analysis.product_name or ""
+    # 产品名优先取预分析（AI 从实际报告提取），避免 AITable 多产品字段（如"牧云、谛听"）
+    # 导致邮件主题/正文使用错误的产品短名
+    product_name = analysis.product_name or refreshed.get("product_name") or ""
     inspection_date = analysis.inspection_date or ""
     quantity = analysis.quantity or ""
 
