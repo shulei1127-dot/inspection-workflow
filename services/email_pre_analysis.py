@@ -1030,7 +1030,8 @@ async def preview_email_content(
 
     # Compose email content (same logic as send_email_from_pre_analysis)
     customer_name = refreshed.get("customer_name") or analysis.customer_name or ""
-    product_name = refreshed.get("product_name") or analysis.product_name or ""
+    # 产品名优先取预分析（AI 从实际报告提取），避免 AITable 多产品字段（如"牧云、谛听"）选错短名
+    product_name = analysis.product_name or refreshed.get("product_name") or ""
     inspection_date = analysis.inspection_date or ""
     quantity = analysis.quantity or ""
 
