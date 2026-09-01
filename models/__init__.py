@@ -1,6 +1,7 @@
 from models.aitable_snapshot import AITableSnapshot
 from models.change_log import ChangeLog
 from models.email_pre_analysis import EmailPreAnalysis
+from models.inspection_info_library import InspectionInfoLibrary
 from models.inspection_closure_attempt import InspectionClosureAttempt
 from models.review_audit_log import ReviewAuditLog
 from models.sales_confirm_log import SalesConfirmLog
@@ -15,6 +16,7 @@ __all__ = [
     "ChangeLog",
     "EmailPreAnalysis",
     "InspectionClosureAttempt",
+    "InspectionInfoLibrary",
     "ReviewAuditLog",
     "SalesConfirmLog",
     "SyncLog",

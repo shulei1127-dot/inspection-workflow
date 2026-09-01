@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     inspection_closure_retry_backoff_seconds: float = 2.0
     inspection_closure_retry_max_backoff_seconds: float = 30.0
 
+    # Inspection info library (巡检信息库)
+    inspection_library_enabled: bool = False  # 巡检信息库同步+回写总开关
+    inspection_library_cron: str = "0 18 * * *"  # 每天18点同步信息库并回写缺失地址/邮箱
+
     # Scheduler
     sync_cron: str = "0 16 * * *"
     email_probe_cron: str = "0 */2 * * *"  # 每2小时探测一次待发邮件数据

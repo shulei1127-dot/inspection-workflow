@@ -128,6 +128,21 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
             registered_ids.append("review:pipeline")
             logger.info("Registered review pipeline job with cron: %s", review_cron)
 
+    # Inspection library job (巡检信息库: 同步 + 回写缺失地址/邮箱)
+    if settings.inspection_library_enabled and settings.dt_dispatch_base_id and settings.dt_dispatch_table_id:
+        library_cron = settings.inspection_library_cron.strip()
+        if library_cron:
+            scheduler.add_job(
+                _run_inspection_library_job,
+                trigger=CronTrigger.from_crontab(library_cron, timezone=tz),
+                id="inspection-library:sync-backfill",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
+            registered_ids.append("inspection-library:sync-backfill")
+            logger.info("Registered inspection library job with cron: %s", library_cron)
+
     # Sales confirm job (巡检确认表单推送)
     if settings.sales_confirm_enabled:
         sales_confirm_cron = settings.sales_confirm_cron.strip()
@@ -520,3 +535,32 @@ def _run_sales_confirm_job() -> None:
         )
     except Exception as e:
         logger.exception("Scheduled sales confirm job failed: %s", e)
+
+
+def _run_inspection_library_job() -> None:
+    """Scheduled inspection library job runner.
+
+    1. 从钉钉表 + 本地工单同步巡检信息库
+    2. 将同 交付ID+项目ID 的历史现场地址/报告邮箱回写到缺失字段的钉钉记录
+    """
+    try:
+        from services import inspection_library_service
+
+        with SessionLocal() as db:
+            sync_result = asyncio.run(inspection_library_service.sync_library(db))
+            logger.info(
+                "Scheduled inspection library sync completed: total=%d new=%d updated=%d skipped=%d",
+                sync_result.get("total", 0),
+                sync_result.get("new", 0),
+                sync_result.get("updated", 0),
+                sync_result.get("skipped", 0),
+            )
+            backfill_result = asyncio.run(inspection_library_service.backfill_missing_info(db, dry_run=False))
+            logger.info(
+                "Scheduled inspection library backfill completed: checked=%d filled=%d no_source=%d",
+                backfill_result.get("checked", 0),
+                backfill_result.get("filled", 0),
+                backfill_result.get("no_source", 0),
+            )
+    except Exception as e:
+        logger.exception("Scheduled inspection library job failed: %s", e)

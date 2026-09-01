@@ -87,6 +87,21 @@ export const fetchAitableAttachments = (recordId: string) =>
   fetchJson(`/api/email-tool/fetch-aitable-attachments/${recordId}`)
 
 // ── Email Pre-Analysis ──
+// ── Inspection Library (巡检信息库) ──
+export const getInspectionLibrary = (params: Record<string, any> = {}) => {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') qs.set(k, String(v))
+  }
+  return fetchJson('/api/inspection-library?' + qs.toString())
+}
+
+export const syncInspectionLibrary = () =>
+  postJson('/api/inspection-library/sync')
+
+export const backfillInspectionLibrary = (dryRun = false) =>
+  postJson(`/api/inspection-library/backfill?dry_run=${dryRun}`)
+
 export const getPreAnalysisStatus = () =>
   fetchJson('/api/email-tool/pre-analysis')
 

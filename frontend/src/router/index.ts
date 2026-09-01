@@ -24,6 +24,11 @@ const router = createRouter({
     },
     // /sync 路由已隐藏，数据同步日志在任务日志页面可查看
     {
+      path: '/inspection-library',
+      name: 'InspectionLibrary',
+      component: () => import('../views/InspectionLibrary.vue'),
+    },
+    {
       path: '/email-tool',
       name: 'EmailTool',
       component: () => import('../views/EmailTool.vue'),
