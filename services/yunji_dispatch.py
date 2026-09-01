@@ -108,6 +108,7 @@ async def fetch_pts_info(pts_order_id: str, db=None) -> dict:
         - project_name: str
         - assigner_name: str (交付分配人)
         - desc: str (工单描述)
+        - products: list[dict] (工单关联产品 [{id, name}], from delivery.product_info)
     """
     # Strategy 1: Try local DB
     if db:
@@ -126,6 +127,7 @@ async def fetch_pts_info(pts_order_id: str, db=None) -> dict:
                 "project_name": project.get("name", ""),
                 "assigner_name": wo.assigner_name or assigner.get("name", ""),
                 "desc": raw.get("desc", ""),
+                "products": _extract_products(delivery),
             }
 
             # If we have project.id, we're good
@@ -145,6 +147,11 @@ async def fetch_pts_info(pts_order_id: str, db=None) -> dict:
           id
           project { id name }
           assigner { id name username }
+          product_info {
+            product_detail {
+              product { id name }
+            }
+          }
         }
       }
     }
@@ -168,6 +175,7 @@ async def fetch_pts_info(pts_order_id: str, db=None) -> dict:
         "project_name": project.get("name", ""),
         "assigner_name": assigner.get("name", ""),
         "desc": item.get("desc", ""),
+        "products": _extract_products(delivery),
     }
 
 
@@ -207,6 +215,52 @@ def _date_to_timestamp(date_str: str) -> int:
     """Convert date string (YYYY-MM-DD) to millisecond timestamp."""
     d = datetime.strptime(date_str, "%Y-%m-%d")
     return int(d.timestamp() * 1000)
+
+
+def _extract_products(delivery: dict) -> list[dict]:
+    """Extract product id/name pairs from PTS delivery.product_info."""
+    products: list[dict] = []
+    product_info = delivery.get("product_info")
+    if isinstance(product_info, list):
+        for item in product_info:
+            detail = item.get("product_detail") if isinstance(item, dict) else None
+            product = detail.get("product") if isinstance(detail, dict) else None
+            if isinstance(product, dict) and product.get("id") and product.get("name"):
+                products.append({"id": str(product["id"]), "name": str(product["name"])})
+    return products
+
+
+def _normalize_product_name(value: str) -> str:
+    """Normalize a product name for fuzzy comparison (strip spaces & brackets)."""
+    return re.sub(r"[\s（）()【】\[\]-]", "", str(value or "")).lower()
+
+
+def _select_crm_product(products: list[dict], pts_products: list[dict]) -> dict | None:
+    """Pick the CRM product matching the PTS work order's actual product.
+
+    Priority:
+    1. Exact match on productId (PTS product.id == yunji productId)
+    2. Name match against yunji productName/label
+    3. Fallback to the first product (original behavior)
+    """
+    if not products:
+        return None
+    if not pts_products:
+        return products[0]
+    for pts_product in pts_products:
+        pts_id = str(pts_product.get("id") or "")
+        pts_name = _normalize_product_name(pts_product.get("name") or "")
+        for product in products:
+            if product.get("productId") == pts_id:
+                return product
+        if not pts_name:
+            continue
+        for product in products:
+            haystack = " ".join(filter(None, [product.get("productName"), product.get("label")]))
+            hay = _normalize_product_name(haystack)
+            if hay and (pts_name in hay or hay in pts_name):
+                return product
+    return products[0]
 
 
 async def create_yunji_requirement(
@@ -276,11 +330,15 @@ async def create_yunji_requirement(
     project_name = crm_project.get("name", pts_info["project_name"])
     logger.info("项目: %s, 购物车ID: %s", project_name, cart_item.get("id"))
 
-    # Find CRM product
-    crm_product = None
-    if products and len(products) > 0:
-        crm_product = products[0]
-        logger.info("商品: %s - %s", crm_product.get("productName"), crm_product.get("formName"))
+    # Find CRM product matching the work order's actual product
+    crm_product = _select_crm_product(products, pts_info.get("products") or [])
+    if crm_product:
+        logger.info(
+            "商品: %s - %s（PTS产品=%s，共%s个候选）",
+            crm_product.get("productName"), crm_product.get("formName"),
+            [p.get("name") for p in (pts_info.get("products") or [])] or "无",
+            len(products or []),
+        )
 
     # Find supplier partner ID
     partner = _find_partner(partners, supplier_full_name)
