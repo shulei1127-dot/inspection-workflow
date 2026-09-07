@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # 不可变部署版本：APP_IMAGE_TAG=git-<commit-sha> docker compose up -d --build
+    image: inspection-workflow-app:${APP_IMAGE_TAG:-latest}
     container_name: inspection-workflow-app-1
     ports:
       - "8100:8100"
@@ -78,16 +80,30 @@ services:
       # Inspection info library (巡检信息库)
       - INSPECTION_LIBRARY_ENABLED=${INSPECTION_LIBRARY_ENABLED:-false}
       - INSPECTION_LIBRARY_CRON=${INSPECTION_LIBRARY_CRON:-0 18 * * *}
+      # Agent Hub (AI 纳管平台快照上报，默认关闭；Token 由 /run/secrets/agent_hub_token 注入)
+      - AGENT_HUB_ENABLED=${AGENT_HUB_ENABLED:-false}
+      - AGENT_HUB_TOKEN_FILE=/run/secrets/agent_hub_token
+      - AGENT_HUB_API_BASE=${AGENT_HUB_API_BASE:-https://support-ai.in.chaitin.net/agent-hub/api/v1}
+      - AGENT_HUB_AGENT_KEY=${AGENT_HUB_AGENT_KEY:-support.inspection-workflow}
+      - AGENT_HUB_INTERVAL_MINUTES=${AGENT_HUB_INTERVAL_MINUTES:-30}
     volumes:
       - /root/.local/share/dws-cli:/root/.local/share/dws-cli
       - /root/.dws:/root/.dws
       - dws-config:/root/.config/dws
       - email-tool-data:/app/email_tool/data
       - ./.git:/app/.git:ro
+      # root-only 密钥目录（宿主 ./.secrets chmod 600，容器内只读 /run/secrets）
+      - ./.secrets:/run/secrets:ro
     depends_on:
       db:
         condition: service_healthy
     stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8100/ >/dev/null || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     restart: unless-stopped
 
   db:

@@ -13,6 +13,7 @@ Removed:
 
 import asyncio
 import logging
+from datetime import datetime
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -202,6 +203,33 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
             )
             registered_ids.append("daily:digest")
             logger.info("Registered daily digest job with cron: %s", digest_cron)
+
+    # Agent Hub snapshot job (AI 纳管平台快照上报，默认关闭)
+    # 注册条件：总开关开启 + 已注入 Token（env 或 root-only 密钥文件）+ agent_key 非空。
+    # 启动一次（next_run_time=now）+ 每 30 分钟一次，顺序见 services.agent_hub_reporter.report_once。
+    token_available = bool(
+        settings.agent_hub_token
+        or (settings.agent_hub_token_file or "").strip()
+    )
+    if (
+        settings.agent_hub_enabled
+        and token_available
+        and settings.agent_hub_agent_key.strip()
+    ):
+        scheduler.add_job(
+            _run_agent_hub_job,
+            trigger=IntervalTrigger(minutes=max(1, int(settings.agent_hub_interval_minutes))),
+            id="agent-hub:snapshot",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            next_run_time=datetime.now() if settings.agent_hub_run_on_startup else None,
+        )
+        registered_ids.append("agent-hub:snapshot")
+        logger.info(
+            "Registered agent hub snapshot job (interval %d min)",
+            settings.agent_hub_interval_minutes,
+        )
 
     return registered_ids
 
@@ -564,3 +592,19 @@ def _run_inspection_library_job() -> None:
             )
     except Exception as e:
         logger.exception("Scheduled inspection library job failed: %s", e)
+
+
+def _run_agent_hub_job() -> None:
+    """Agent Hub 快照上报任务（AI 纳管平台，默认关闭）。"""
+    try:
+        from services.agent_hub_reporter import report_once
+
+        with SessionLocal() as db:
+            result = asyncio.run(report_once(db))
+        logger.info(
+            "Agent Hub snapshot: status=%s agent=%s",
+            result.get("status"),
+            result.get("agent_key"),
+        )
+    except Exception as e:
+        logger.warning("Agent Hub snapshot failed: %s", str(e)[:300])

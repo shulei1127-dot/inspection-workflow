@@ -125,6 +125,17 @@ class Settings(BaseSettings):
     daily_change_summary_repo_path: str = "/app"  # Git 仓库路径（容器内）
     daily_change_summary_webhook_url: str = ""  # 变更摘要钉钉机器人 webhook（空则用默认）
 
+
+    # Agent Hub (support-ai 纳管平台快照上报，默认关闭)
+    agent_hub_enabled: bool = False  # 总开关（默认关闭，不影响线上）
+    agent_hub_api_base: str = "https://support-ai.in.chaitin.net/agent-hub/api/v1"
+    agent_hub_token: str = ""  # 平台签发的团队专属 Bearer Token，不入 Git
+    agent_hub_token_file: str = ""  # root-only 密钥文件路径（容器 /run/secrets/agent_hub_token），与 TOKEN 二选一
+    agent_hub_agent_key: str = "support.inspection-workflow"
+    agent_hub_interval_minutes: int = 30  # 快照上报间隔（分钟）
+    agent_hub_run_on_startup: bool = True  # 应用启动后先执行一次
+    agent_hub_timeout_seconds: float = 20.0
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

@@ -1,0 +1,19 @@
+# Agent Hub 正式接入验证流水线（源仓 400/inspection-workflow, feature/review-audit-module）
+# 验证内容：语法编译 + 上报模块单元测试（白名单/真实PG口径/新鲜度/幂等/401降级）。
+# 单测全部离线运行，不发外部请求；真实库冒烟按需手动执行：
+#   AGENT_HUB_TEST_REAL_DB=1 python3 -m unittest tests.test_agent_hub_reporter.RealPostgresSemanticsTest -v
+stages:
+  - test
+
+test:
+  stage: test
+  image: python:3.12-slim
+  before_script:
+    - pip install --quiet -r requirements.txt
+  script:
+    - python -m py_compile core/config.py scheduler/jobs.py services/agent_hub_reporter.py
+    - python -m unittest tests.test_agent_hub_reporter -v
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "feature/review-audit-module"'
+    - when: never
