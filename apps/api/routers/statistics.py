@@ -77,7 +77,7 @@ def _normalize_month(month: str | None) -> str:
 
 async def _load_dispatch_records() -> list[dict]:
     """Fetch all 客户巡检派单 records once per TTL (single-flight)."""
-    global _fetch_lock
+    global _fetch_cache, _fetch_lock
     if time.time() - _fetch_cache["ts"] < _FETCH_TTL_SECONDS:
         return _fetch_cache["records"]
 
