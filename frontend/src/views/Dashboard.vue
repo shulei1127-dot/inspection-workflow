@@ -5,7 +5,7 @@
         <h1>数据概览</h1>
         <div class="dashboard-meta">
           数据源：钉钉《客户巡检派单》表 · 按月/按年归集
-          <span class="muted">｜待派单=需求单号未填写｜待发邮件=未发送且未标记「不涉及」</span>
+          <span class="muted">｜已派单=需求单号去重｜待派单=现场未派+远程未派÷3｜待发邮件=邮件是否发送=否</span>
         </div>
       </div>
       <div class="scope-picker">
@@ -56,12 +56,12 @@
       <div class="stat-card">
         <div class="label">已派单</div>
         <div class="value success">{{ overview.dispatched ?? '-' }}</div>
-        <div class="sub">需求单号已回写</div>
+        <div class="sub">按需求单号去重（1 单可覆盖多个工单）</div>
       </div>
       <div class="stat-card">
         <div class="label">待派单</div>
         <div class="value warning">{{ overview.pending_dispatch ?? '-' }}</div>
-        <div class="sub">其中可立即派单 {{ overview.dispatch_ready ?? '-' }} 条</div>
+        <div class="sub">现场待派 {{ overview.pending_onsite ?? '-' }} 条 · 远程 {{ overview.pending_remote_rows ?? '-' }} 条折 {{ overview.pending_remote ?? '-' }} 单</div>
       </div>
       <div class="stat-card">
         <div class="label">已发邮件</div>
@@ -70,8 +70,8 @@
       </div>
       <div class="stat-card">
         <div class="label">待发邮件</div>
-        <div class="value warning">{{ overview.pending_email ?? '-' }}</div>
-        <div class="sub">报告已就绪 {{ overview.email_ready ?? '-' }} · 报告未上传 {{ overview.report_missing ?? '-' }}</div>
+        <div class="value warning">{{ overview.email_pending ?? '-' }}</div>
+        <div class="sub">邮件是否发送 = 否 · 不涉及 {{ overview.email_na ?? '-' }} 条不计</div>
       </div>
       <div class="stat-card">
         <div class="label">已闭环</div>
@@ -322,9 +322,9 @@ function renderDispatchChart(items: any[]) {
 function renderEmailChart(items: any[]) {
   renderPieChart('email', emailChartRef.value, items, {
     '已发送': '#52c41a',
-    '待发送': '#409eff',
-    '报告未上传': '#faad14',
+    '待发送': '#faad14',
     '不涉及': '#d9d9d9',
+    '未填写': '#909399',
   })
 }
 

@@ -1,28 +1,31 @@
 """Statistics API: aggregation queries for the frontend dashboard.
 
-数据概览统一以钉钉 AI 数据表《客户巡检派单》为唯一事实源，按每条记录的
-「记录时间」月份归集。本地 work_orders.planned_completion 只反映工单当前
-计划完成日期，无法还原钉钉表每月新增的历史行，因此不再用于月度统计。
+数据概览以钉钉 AI 数据表《客户巡检派单》为唯一事实源，按记录时间按「月」或
+「年」归集。本地 work_orders.planned_completion 只反映工单当前计划完成日期，
+无法还原钉钉表每月新增的历史行，因此不用于统计。
 
-业务口径（基于钉钉表字段）：
-- 工单总数   = 所选月份记录行数
-- 已派单     = 需求单号非空（云集派单成功后写回需求单号/订单编号）
-- 待派单     = 工单总数 - 已派单（需求单号为空）
-- 可立即派单 = 待派单中 伙伴供应商+伙伴负责人+工程师 均已填（满足云集派单条件）
+业务口径（2026-09 确认，基于钉钉表字段）：
+- 工单总数   = 所选范围内记录行数
+- 已派单     = 需求单号非空且去重（一次派单覆盖多个巡检工单时，需求单号相同只算 1 次）
+- 待派单     = 巡检方式=现场 且 需求单号为空 的数量
+              + ceil(巡检方式=远程 且 需求单号为空 的数量 / 3)
+              （远程 3 次巡检共用 1 个需求单号；远程-舒磊/延期巡检不涉及派单，不计入）
 - 已发邮件   = 邮件是否发送 = 是
-- 待发邮件   = 未发送且未标记「不涉及」；其中报告已上传=可发未发，报告未上传=报告未就绪
+- 待发邮件   = 邮件是否发送 = 否（不涉及/未填写不计入）
+- 不涉及邮件 = 邮件是否发送 = 不涉及（客户不发邮件，巡检报告可为空）
 - 已闭环     = 工单是否闭环 = 是
 
 Endpoints:
 - GET /api/statistics/overview      — 月/年核心指标（month 或 year 二选一）
-- GET /api/statistics/by-region     — 月/年区域分布
-- GET /api/statistics/by-status     — 月/年派单/邮件状态（饼图，扇区合计=范围工单总数）
-- GET /api/statistics/monthly-trend — 按月近 6 个月 / 按年 1-12 月趋势
+- GET /api/statistics/by-region     — 月/年区域分布（按记录行数）
+- GET /api/statistics/by-status     — 月/年派单/邮件状态（饼图口径）
+- GET /api/statistics/monthly-trend — 按月近 6 个月 / 按年 1-12 月（按记录行数）
 - GET /api/statistics/triggers      — 触发日志成功/失败统计（本地库，独立口径）
 """
 
 import asyncio
 import logging
+import math
 import re
 import time
 from collections import Counter
@@ -39,7 +42,6 @@ from services import dingtalk_client
 from services.aitable_fields import (
     DISPATCH,
     current_month,
-    extract_engineer,
     extract_select_name,
     extract_text,
 )
@@ -52,20 +54,21 @@ router = APIRouter(tags=["statistics"])
 _STATS_FIELD_IDS = ",".join([
     DISPATCH["记录时间"],
     DISPATCH["所属区域"],
+    DISPATCH["巡检方式"],
     DISPATCH["需求编号"],
     DISPATCH["邮件是否发送"],
-    DISPATCH["巡检报告"],
     DISPATCH["巡检是否完成"],
     DISPATCH["工单是否闭环"],
-    DISPATCH["伙伴供应商"],
-    DISPATCH["伙伴负责人"],
-    DISPATCH["工程师"],
 ])
 
 _FETCH_TTL_SECONDS = 30  # 同一份钉钉表数据在窗口期内复用，避免频繁调用 dws
 
 _fetch_cache: dict = {"ts": 0.0, "records": []}
 _fetch_lock: asyncio.Lock | None = None
+
+_METHOD_ONSITE = "现场"
+_METHOD_REMOTE = "远程"
+_REMOTE_SHARE = 3  # 远程巡检 3 条记录共用 1 个需求单号
 
 
 def _normalize_month(month: str | None) -> str:
@@ -137,70 +140,6 @@ def _record_month(cells: dict) -> str | None:
     return match.group(1) if match else None
 
 
-def _empty_month() -> dict:
-    return {
-        "total": 0,
-        "dispatched": 0,
-        "dispatch_ready": 0,
-        "emailed": 0,
-        "email_na": 0,
-        "email_ready": 0,
-        "report_missing": 0,
-        "completed": 0,
-        "closed": 0,
-        "regions": Counter(),
-    }
-
-
-def _aggregate_by_month(records: list[dict]) -> tuple[dict[str, dict], int]:
-    """按记录时间月份聚合派单/邮件/闭环等状态，返回 (month→agg, 未归集条数)。"""
-    months: dict[str, dict] = {}
-    unattributed = 0
-    for record in records:
-        cells = _cells_of(record)
-        month = _record_month(cells)
-        if not month:
-            unattributed += 1
-            continue
-        agg = months.setdefault(month, _empty_month())
-        agg["total"] += 1
-
-        demand = bool((extract_text(cells.get(DISPATCH["需求编号"])) or "").strip())
-        supplier = bool((extract_select_name(cells.get(DISPATCH["伙伴供应商"])) or "").strip())
-        manager = bool((extract_engineer(cells.get(DISPATCH["伙伴负责人"])) or "").strip())
-        engineer = bool((extract_engineer(cells.get(DISPATCH["工程师"])) or "").strip())
-        region = extract_select_name(cells.get(DISPATCH["所属区域"])) or "未分配"
-        agg["regions"][region] += 1
-
-        email = extract_select_name(cells.get(DISPATCH["邮件是否发送"]))
-        report_val = cells.get(DISPATCH["巡检报告"])
-        has_report = isinstance(report_val, list) and bool(report_val)
-
-        if demand:
-            agg["dispatched"] += 1
-        elif supplier and manager and engineer:
-            agg["dispatch_ready"] += 1
-
-        if email == "是":
-            agg["emailed"] += 1
-        elif email == "不涉及":
-            agg["email_na"] += 1
-        elif has_report:
-            agg["email_ready"] += 1  # 报告已就绪，可发未发
-        else:
-            agg["report_missing"] += 1  # 报告未上传
-
-        if extract_select_name(cells.get(DISPATCH["巡检是否完成"])) == "是":
-            agg["completed"] += 1
-        if extract_select_name(cells.get(DISPATCH["工单是否闭环"])) == "是":
-            agg["closed"] += 1
-    return months, unattributed
-
-
-_AGG_KEYS = ("total", "dispatched", "dispatch_ready", "emailed", "email_na",
-             "email_ready", "report_missing", "completed", "closed")
-
-
 def _resolve_scope(month: str | None, year: str | None) -> tuple[str, str]:
     """返回 (scope, value)；scope ∈ {month, year}，value 为 YYYY-MM 或 YYYY。"""
     if month is not None:
@@ -212,23 +151,94 @@ def _resolve_scope(month: str | None, year: str | None) -> tuple[str, str]:
     return "month", _normalize_month(None)
 
 
-def _yearly_agg(months: dict[str, dict], year: str) -> dict:
-    """将某年各月聚合值累加为年度口径。"""
-    agg = _empty_month()
-    prefix = year + "-"
-    for month, m_agg in months.items():
-        if not month.startswith(prefix):
+def _in_scope(record_month: str, scope: str, value: str) -> bool:
+    if not record_month:
+        return False
+    if scope == "month":
+        return record_month == value
+    return record_month.startswith(value + "-")
+
+
+def _empty_scope() -> dict:
+    return {
+        "total": 0,
+        "demand_set": set(),
+        "onsite_pending": 0,
+        "remote_pending_rows": 0,
+        "emailed": 0,
+        "email_pending": 0,
+        "email_na": 0,
+        "email_unmarked": 0,
+        "completed": 0,
+        "closed": 0,
+        "regions": Counter(),
+    }
+
+
+def _compute_scope(records: list[dict], scope: str, value: str) -> tuple[dict, int]:
+    """按范围（月/年）统计一次，返回 (统计结果, 记录时间缺失条数)。
+
+    统计口径见模块顶部注释。
+    """
+    acc = _empty_scope()
+    unattributed = 0
+    for record in records:
+        cells = _cells_of(record)
+        record_month = _record_month(cells)
+        if not _in_scope(record_month, scope, value):
+            if not record_month:
+                unattributed += 1
             continue
-        for key in _AGG_KEYS:
-            agg[key] += m_agg[key]
-        agg["regions"] += m_agg["regions"]
-    return agg
+        acc["total"] += 1
+        region = extract_select_name(cells.get(DISPATCH["所属区域"])) or "未分配"
+        acc["regions"][region] += 1
+
+        demand = (extract_text(cells.get(DISPATCH["需求编号"])) or "").strip()
+        method = extract_select_name(cells.get(DISPATCH["巡检方式"])) or ""
+        if demand:
+            acc["demand_set"].add(demand)
+        elif method == _METHOD_ONSITE:
+            acc["onsite_pending"] += 1
+        elif method == _METHOD_REMOTE:
+            acc["remote_pending_rows"] += 1
+        # 远程-舒磊 / 延期巡检 / 巡检方式未填写：不涉及派单，不计待派单
+
+        email = extract_select_name(cells.get(DISPATCH["邮件是否发送"]))
+        if email == "是":
+            acc["emailed"] += 1
+        elif email == "否":
+            acc["email_pending"] += 1
+        elif email == "不涉及":
+            acc["email_na"] += 1
+        else:
+            acc["email_unmarked"] += 1
+
+        if extract_select_name(cells.get(DISPATCH["巡检是否完成"])) == "是":
+            acc["completed"] += 1
+        if extract_select_name(cells.get(DISPATCH["工单是否闭环"])) == "是":
+            acc["closed"] += 1
+    return acc, unattributed
 
 
-def _pick_agg(months: dict[str, dict], scope: str, value: str) -> dict:
-    if scope == "year":
-        return _yearly_agg(months, value)
-    return months.get(value, _empty_month())
+def _scope_overview(acc: dict) -> dict:
+    """把原始统计结果整理成接口输出结构。"""
+    remote_rows = acc["remote_pending_rows"]
+    remote_pending = math.ceil(remote_rows / _REMOTE_SHARE)
+    pending_dispatch = acc["onsite_pending"] + remote_pending
+    return {
+        "total": acc["total"],
+        "dispatched": len(acc["demand_set"]),
+        "pending_dispatch": pending_dispatch,
+        "pending_onsite": acc["onsite_pending"],
+        "pending_remote_rows": remote_rows,
+        "pending_remote": remote_pending,
+        "emailed": acc["emailed"],
+        "email_pending": acc["email_pending"],
+        "email_na": acc["email_na"],
+        "email_unmarked": acc["email_unmarked"],
+        "completed": acc["completed"],
+        "closed": acc["closed"],
+    }
 
 
 def _previous_months(month: str, count: int) -> list[str]:
@@ -266,32 +276,16 @@ async def statistics_overview(
     month: str | None = Query(None, description="YYYY-MM, 与 year 二选一，默认当前月"),
     year: str | None = Query(None, description="YYYY, 全年口径"),
 ):
-    """核心指标：按所选月份或所选年份统计（来源：钉钉客户巡检派单表）。"""
+    """核心指标：按所选月份或年份统计（来源：钉钉客户巡检派单表）。"""
     scope, value = _resolve_scope(month, year)
     records = await _load_dispatch_records()
-    months, unattributed = _aggregate_by_month(records)
-    agg = _pick_agg(months, scope, value)
-
-    dispatched = agg["dispatched"]
-    total = agg["total"]
-    email_ready = agg["email_ready"]
-    report_missing = agg["report_missing"]
-
+    acc, unattributed = _compute_scope(records, scope, value)
+    overview = _scope_overview(acc)
     return {
         "scope": scope,
         "month": value if scope == "month" else None,
         "year": value if scope == "year" else None,
-        "total": total,
-        "dispatched": dispatched,
-        "pending_dispatch": total - dispatched,
-        "dispatch_ready": agg["dispatch_ready"],
-        "emailed": agg["emailed"],
-        "email_na": agg["email_na"],
-        "email_ready": email_ready,
-        "report_missing": report_missing,
-        "pending_email": email_ready + report_missing,
-        "completed": agg["completed"],
-        "closed": agg["closed"],
+        **overview,
         "unattributed": unattributed,
     }
 
@@ -301,14 +295,13 @@ async def statistics_by_region(
     month: str | None = Query(None, description="YYYY-MM, 与 year 二选一"),
     year: str | None = Query(None, description="YYYY, 全年口径"),
 ):
-    """区域分布：按所选月份或年份统计。"""
+    """区域分布：按所选范围记录行数统计。"""
     scope, value = _resolve_scope(month, year)
     records = await _load_dispatch_records()
-    months, _ = _aggregate_by_month(records)
-    agg = _pick_agg(months, scope, value)
+    acc, _ = _compute_scope(records, scope, value)
     items = [
         {"region": region, "count": count}
-        for region, count in agg["regions"].most_common()
+        for region, count in acc["regions"].most_common()
     ]
     return {"scope": scope, "month": value if scope == "month" else None,
             "year": value if scope == "year" else None, "items": items}
@@ -319,29 +312,31 @@ async def statistics_by_status(
     month: str | None = Query(None, description="YYYY-MM, 与 year 二选一"),
     year: str | None = Query(None, description="YYYY, 全年口径"),
 ):
-    """派单状态 + 邮件状态（饼图口径，扇区合计等于所选范围工单总数）。"""
+    """派单状态 + 邮件状态（饼图口径）。
+
+    - 派单状态：已派单=需求单号去重次数；待派单=现场未派 + 远程未派折算
+    - 邮件状态：已发送/待发送(=否)/不涉及/未填写
+    """
     scope, value = _resolve_scope(month, year)
     records = await _load_dispatch_records()
-    months, _ = _aggregate_by_month(records)
-    agg = _pick_agg(months, scope, value)
+    acc, _ = _compute_scope(records, scope, value)
+    overview = _scope_overview(acc)
 
-    total = agg["total"]
-    dispatched = agg["dispatched"]
     dispatch_status = []
-    if dispatched > 0:
-        dispatch_status.append({"status": "已派单", "count": dispatched})
-    if total - dispatched > 0:
-        dispatch_status.append({"status": "待派单", "count": total - dispatched})
+    if overview["dispatched"] > 0:
+        dispatch_status.append({"status": "已派单", "count": overview["dispatched"]})
+    if overview["pending_dispatch"] > 0:
+        dispatch_status.append({"status": "待派单", "count": overview["pending_dispatch"]})
 
     email_status = []
-    if agg["emailed"] > 0:
-        email_status.append({"status": "已发送", "count": agg["emailed"]})
-    if agg["email_ready"] > 0:
-        email_status.append({"status": "待发送", "count": agg["email_ready"]})
-    if agg["report_missing"] > 0:
-        email_status.append({"status": "报告未上传", "count": agg["report_missing"]})
-    if agg["email_na"] > 0:
-        email_status.append({"status": "不涉及", "count": agg["email_na"]})
+    if overview["emailed"] > 0:
+        email_status.append({"status": "已发送", "count": overview["emailed"]})
+    if overview["email_pending"] > 0:
+        email_status.append({"status": "待发送", "count": overview["email_pending"]})
+    if overview["email_na"] > 0:
+        email_status.append({"status": "不涉及", "count": overview["email_na"]})
+    if overview["email_unmarked"] > 0:
+        email_status.append({"status": "未填写", "count": overview["email_unmarked"]})
 
     return {"scope": scope, "month": value if scope == "month" else None,
             "year": value if scope == "year" else None,
@@ -353,20 +348,32 @@ async def statistics_monthly_trend(
     month: str | None = Query(None, description="YYYY-MM, 与 year 二选一"),
     year: str | None = Query(None, description="YYYY, 全年口径（返回该年 1-12 月）"),
 ):
-    """趋势：按月=近 6 个月；按年=所选年 1-12 月。"""
+    """趋势：按月=近 6 个月；按年=所选年 1-12 月（按记录行数）。"""
     scope, value = _resolve_scope(month, year)
     records = await _load_dispatch_records()
-    months, _ = _aggregate_by_month(records)
+
+    # 逐月统计（行数口径，用于趋势图：工单量 / 已闭环）
+    month_stats: dict[str, dict] = {}
+    for record in records:
+        cells = _cells_of(record)
+        record_month = _record_month(cells)
+        if not record_month:
+            continue
+        acc = month_stats.setdefault(record_month, _empty_scope())
+        acc["total"] += 1
+        if extract_select_name(cells.get(DISPATCH["工单是否闭环"])) == "是":
+            acc["closed"] += 1
+        if extract_select_name(cells.get(DISPATCH["邮件是否发送"])) == "是":
+            acc["emailed"] += 1
 
     items = []
     for m in _trend_months(scope, value):
-        agg = months.get(m, _empty_month())
+        acc = month_stats.get(m, _empty_scope())
         items.append({
             "month": m,
-            "total": agg["total"],
-            "dispatched": agg["dispatched"],
-            "emailed": agg["emailed"],
-            "closed": agg["closed"],
+            "total": acc["total"],
+            "emailed": acc["emailed"],
+            "closed": acc["closed"],
         })
     return {"scope": scope, "month": value if scope == "month" else None,
             "year": value if scope == "year" else None, "items": items}
