@@ -26,9 +26,6 @@ export const getOverview = (month?: string) =>
 export const getByRegion = (month?: string) =>
   fetchJson('/api/statistics/by-region' + (month ? `?month=${month}` : ''))
 
-export const getByType = (month?: string) =>
-  fetchJson('/api/statistics/by-type' + (month ? `?month=${month}` : ''))
-
 export const getByStatus = (month?: string) =>
   fetchJson('/api/statistics/by-status' + (month ? `?month=${month}` : ''))
 
