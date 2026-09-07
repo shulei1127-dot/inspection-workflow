@@ -2,7 +2,7 @@
   <div class="app-layout">
     <aside class="sidebar">
       <div class="logo">
-        <h2>巡检工单</h2>
+        <h2>主动服务</h2>
         <span class="subtitle">流程自动化</span>
       </div>
       <nav class="nav-menu">
