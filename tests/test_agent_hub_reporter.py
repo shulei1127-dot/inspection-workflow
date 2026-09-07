@@ -2,9 +2,10 @@
 
 覆盖验收清单：
 - 指标白名单与真实 PostgreSQL 口径（SQL 语句/表/字段/过滤条件断言 + 可选真实库冒烟）；
-- source_updated_at 回填与新鲜度降级（healthy/degraded/offline）；
-- snapshot_id / Idempotency-Key 稳定；
-- verify -> register -> snapshot 顺序与 401/非 2xx 中止（保留 Hub 上一份快照语义）。
+- source_updated_at 回填与新鲜度 stale 表达（Agent Hub v1 只接受 healthy）；
+- verify 携带完整 {"manifest": ...}、register/update 携带完整 manifest；
+- snapshot_id / Idempotency-Key 稳定（同端点同载荷幂等）；
+- 401/非 2xx 中止（保留 Hub 上一份快照语义）。
 
 真实库冒烟（需可连 DATABASE_URL）：
     AGENT_HUB_TEST_REAL_DB=1 python3 -m unittest tests.test_agent_hub_reporter.RealPostgresSemanticsTest -v
@@ -13,6 +14,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import os
 import tempfile
 import unittest
@@ -33,6 +35,7 @@ def make_settings(**overrides) -> SimpleNamespace:
         agent_hub_api_base="https://hub.example.invalid/api/v1",
         agent_hub_token="",
         agent_hub_token_file="",
+        agent_hub_dashboard_url="",
         agent_hub_agent_key=AGENT_KEY,
         agent_hub_interval_minutes=30,
         agent_hub_run_on_startup=True,
@@ -95,7 +98,7 @@ class BuildSnapshotTests(unittest.TestCase):
         snap = self._build(db)
 
         keys = [m["key"] for m in snap["metrics"]]
-        self.assertEqual(keys, list(ah.METRIC_KEYS), "指标 key 必须严格等于白名单，新增指标需同步白名单")
+        self.assertEqual(keys, list(ah.METRIC_KEYS), "指标 key 必须严格等于白名单，新增指标需同步白名单/样例快照")
         self.assertEqual(len(keys), len(set(keys)), "指标 key 不允许重复")
 
         required_fields = ("key", "label", "value", "unit", "definition", "source", "refresh_frequency", "threshold")
@@ -133,33 +136,37 @@ class BuildSnapshotTests(unittest.TestCase):
         self.assertIn("SELECT max(started_at) FROM sync_logs", joined)
         self.assertIn("status IN ('success', 'partial')", joined)
 
-    def test_healthy_source_updated_at_uses_last_success(self):
+    def test_healthy_when_fresh(self):
         db = FakeDB(last_success=FIXED_NOW - _dt.timedelta(hours=1))
         snap = self._build(db)
 
-        self.assertEqual(snap["health"]["status"], "healthy")
+        self.assertEqual(snap["health"]["status"], "healthy", "Agent Hub v1 只接受 healthy")
+        self.assertFalse(snap["health"]["stale"])
         self.assertEqual(snap["source_updated_at"], "2026-09-07T03:30:00Z")
         self.assertEqual(snap["health"]["last_success_at"], "2026-09-07T03:30:00Z")
-        self.assertEqual(snap["suggestions"], [], "healthy 时不应产生建议")
+        self.assertEqual(snap["suggestions"], [], "fresh 时不应产生建议")
 
-    def test_degraded_when_last_success_older_than_sla(self):
+    def test_stale_when_last_success_older_than_sla(self):
         db = FakeDB(last_success=FIXED_NOW - _dt.timedelta(days=2))
         snap = self._build(db)
 
-        self.assertEqual(snap["health"]["status"], "degraded")
+        self.assertEqual(snap["health"]["status"], "healthy", "过期不得发送 offline/degraded")
+        self.assertTrue(snap["health"]["stale"], "过期用 stale=true 表达")
         self.assertEqual(snap["source_updated_at"], "2026-09-05T04:30:00Z")
-        self.assertEqual(len(snap["suggestions"]), 1, "degraded 应给出新鲜度 watch 建议")
+        self.assertEqual(len(snap["suggestions"]), 1, "stale 应给出新鲜度 watch 建议")
 
-    def test_offline_when_no_success_or_very_stale(self):
+    def test_stale_when_no_success_or_very_stale(self):
         db = FakeDB(last_success=None)
         snap = self._build(db)
-        self.assertEqual(snap["health"]["status"], "offline")
+        self.assertEqual(snap["health"]["status"], "healthy")
+        self.assertTrue(snap["health"]["stale"])
         self.assertEqual(snap["source_updated_at"], snap["observed_at"], "无成功记录时回退为观测时间")
         self.assertEqual(len(snap["suggestions"]), 1)
 
         stale_db = FakeDB(last_success=FIXED_NOW - _dt.timedelta(days=100))
         stale_snap = self._build(stale_db)
-        self.assertEqual(stale_snap["health"]["status"], "offline")
+        self.assertEqual(stale_snap["health"]["status"], "healthy")
+        self.assertTrue(stale_snap["health"]["stale"])
 
     def test_snapshot_id_and_idempotency_key_stable(self):
         db = FakeDB(counts=dict(tracked=1), last_success=FIXED_NOW)
@@ -170,15 +177,35 @@ class BuildSnapshotTests(unittest.TestCase):
         self.assertRegex(snap1["snapshot_id"], r"^support\.inspection-workflow-\d{8}T\d{4}Z$")
         self.assertEqual(snap1["snapshot_id"], f"{AGENT_KEY}-20260907T0430Z")
 
-        key1 = ah.idempotency_key(AGENT_KEY, snap1["snapshot_id"])
-        key2 = ah.idempotency_key(AGENT_KEY, snap1["snapshot_id"])
-        self.assertEqual(key1, key2, "Idempotency-Key 对同一快照必须稳定")
-        self.assertNotEqual(key1, ah.idempotency_key(AGENT_KEY, "other-snapshot"))
+        payload = {"a": 1, "b": [2, 3]}
+        key1 = ah.idempotency_key(AGENT_KEY, "snapshot", payload)
+        key2 = ah.idempotency_key(AGENT_KEY, "snapshot", payload)
+        self.assertEqual(key1, key2, "同端点同载荷的 Idempotency-Key 必须稳定")
+        self.assertNotEqual(key1, ah.idempotency_key(AGENT_KEY, "verify", payload), "不同端点必须使用不同幂等键")
+        self.assertNotEqual(key1, ah.idempotency_key(AGENT_KEY, "snapshot", {"a": 1}), "载荷变化必须产生新键")
 
     def test_source_updated_at_falls_back_to_observed_at(self):
         db = FakeDB(last_success=None)
         snap = self._build(db)
         self.assertEqual(snap["source_updated_at"], snap["observed_at"])
+
+
+class ManifestTests(unittest.TestCase):
+    def test_manifest_matches_agent_registration_requirements(self):
+        settings = make_settings()
+        manifest = ah.manifest_for(settings)
+        self.assertEqual(manifest["schema_version"], "v1")
+        self.assertEqual(manifest["agent_key"], AGENT_KEY)
+        self.assertEqual(manifest["data_classification"], "aggregated_sanitized")
+        for key in ("display_name", "description", "owner", "dashboard_url"):
+            self.assertTrue(str(manifest.get(key, "")).strip())
+        for key in ("capabilities", "workflow", "automations"):
+            self.assertIsInstance(manifest.get(key), list)
+            self.assertTrue(manifest[key])
+
+    def test_dashboard_url_override(self):
+        settings = make_settings(agent_hub_dashboard_url="https://dash.example/")
+        self.assertEqual(ah.manifest_for(settings)["dashboard_url"], "https://dash.example/")
 
 
 class TokenResolutionTests(unittest.TestCase):
@@ -205,9 +232,8 @@ class TokenResolutionTests(unittest.TestCase):
 
     def test_missing_file_returns_empty_without_logging_secret(self):
         settings = make_settings(agent_hub_token="", agent_hub_token_file="/nonexistent/agent_hub_token")
-        with self.assertLogs(ah.logger, level="WARNING") as logs:
+        with self.assertLogs(ah.logger, level="WARNING"):
             self.assertEqual(ah.resolve_token(settings), "")
-        self.assertTrue(all("agent_hub_token" not in msg or "token" in msg for msg in logs.output))
 
     def test_is_configured(self):
         path = self._write_token_file("x")
@@ -220,7 +246,7 @@ class TokenResolutionTests(unittest.TestCase):
 
 class AgentHubHTTPFlowTests(unittest.IsolatedAsyncioTestCase):
     def _calls(self, responses):
-        """responses: list[(method_suffix_predicate, status)] 按 URL 顺序返回。"""
+        """responses: 按端点返回状态码；记录请求便于断言。"""
         calls = []
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -236,10 +262,14 @@ class AgentHubHTTPFlowTests(unittest.IsolatedAsyncioTestCase):
 
         return calls, httpx.MockTransport(handler)
 
-    async def test_full_round_in_order_with_stable_headers(self):
-        calls, transport = self._calls({})
+    def _run(self, calls, transport, token="secret-token"):
         db = FakeDB(counts=dict(tracked=3), last_success=FIXED_NOW)
-        with patch.object(ah, "get_settings", return_value=make_settings(agent_hub_token="secret-token")), fixed_now_patch():
+        return patch.object(ah, "get_settings", return_value=make_settings(agent_hub_token=token)), db
+
+    async def test_full_round_sends_full_manifest_and_healthy_snapshot(self):
+        calls, transport = self._calls({})
+        settings_patch, db = self._run(calls, transport)
+        with settings_patch, fixed_now_patch():
             result = await ah.report_once(db, transport=transport)
 
         self.assertEqual(result["status"], "ok")
@@ -251,10 +281,54 @@ class AgentHubHTTPFlowTests(unittest.IsolatedAsyncioTestCase):
             "POST /api/v1/agents/support.inspection-workflow/snapshots",
         ], "必须严格按 verify -> register/update -> snapshot 顺序上报")
 
-        expected_idem = ah.idempotency_key(AGENT_KEY, result["snapshot_id"])
+        expected_manifest = ah.manifest_for(make_settings())
+        verify_body = json.loads(calls[0].content)
+        self.assertEqual(verify_body, {"manifest": expected_manifest}, "verify 必须携带完整 manifest")
+        register_body = json.loads(calls[1].content)
+        self.assertEqual(register_body, expected_manifest, "register/update 必须携带完整 manifest")
+        self.assertEqual(register_body["agent_key"], AGENT_KEY)
+        self.assertEqual(register_body["data_classification"], "aggregated_sanitized")
+
+        snapshot_body = json.loads(calls[2].content)
+        self.assertEqual(snapshot_body["health"]["status"], "healthy", "Agent Hub v1 只接受 healthy")
+        self.assertEqual(snapshot_body["metrics"][0]["value"], 3)
+        self.assertNotIn("offline", json.dumps(snapshot_body, ensure_ascii=False))
+        self.assertNotIn("degraded", json.dumps(snapshot_body, ensure_ascii=False))
+
         for req in calls:
             self.assertEqual(req.headers.get("authorization"), "Bearer secret-token")
-            self.assertEqual(req.headers.get("idempotency-key"), expected_idem, "同轮三次请求必须携带稳定 Idempotency-Key")
+
+        # 幂等键：同端点同载荷稳定、不同端点互不相同
+        verify_key = calls[0].headers.get("idempotency-key")
+        register_key = calls[1].headers.get("idempotency-key")
+        snapshot_key = calls[2].headers.get("idempotency-key")
+        self.assertNotEqual(verify_key, register_key)
+        self.assertNotEqual(register_key, snapshot_key)
+        self.assertEqual(
+            verify_key,
+            ah.idempotency_key(AGENT_KEY, "verify", {"manifest": expected_manifest}),
+        )
+        self.assertEqual(
+            register_key,
+            ah.idempotency_key(AGENT_KEY, "register", expected_manifest),
+        )
+
+    async def test_repeat_round_is_idempotent_per_endpoint(self):
+        calls1, transport = self._calls({})
+        settings_patch, db = self._run(calls1, transport)
+        with settings_patch, fixed_now_patch():
+            await ah.report_once(db, transport=transport)
+
+        calls2, transport2 = self._calls({})
+        with settings_patch, fixed_now_patch():
+            await ah.report_once(db, transport=transport2)
+
+        for first, second in zip(calls1, calls2):
+            self.assertEqual(
+                first.headers.get("idempotency-key"),
+                second.headers.get("idempotency-key"),
+                "相同快照重试必须使用相同幂等键",
+            )
 
     async def test_401_on_verify_aborts_round(self):
         calls, transport = self._calls({"verify": 401})
@@ -275,11 +349,9 @@ class AgentHubHTTPFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_disabled_without_token_never_requests(self):
         transport = httpx.MockTransport(lambda req: httpx.Response(200))
         db = FakeDB()
-        # 无 env token 且无 token file
         with patch.object(ah, "get_settings", return_value=make_settings(agent_hub_token="", agent_hub_token_file="")):
             result = await ah.report_once(db, transport=transport)
         self.assertEqual(result["status"], "disabled")
-        # 总开关关闭但有 token
         with patch.object(ah, "get_settings", return_value=make_settings(agent_hub_enabled=False, agent_hub_token="t")):
             result = await ah.report_once(db, transport=transport)
         self.assertEqual(result["status"], "disabled")
@@ -317,6 +389,7 @@ class RealPostgresSemanticsTest(unittest.TestCase):
 
         expected_updated_at = ah._iso(last_success) if last_success else snap["observed_at"]
         self.assertEqual(snap["source_updated_at"], expected_updated_at)
+        self.assertEqual(snap["health"]["status"], "healthy", "Agent Hub v1 只接受 healthy")
 
 
 if __name__ == "__main__":

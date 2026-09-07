@@ -131,6 +131,7 @@ class Settings(BaseSettings):
     agent_hub_api_base: str = "https://support-ai.in.chaitin.net/agent-hub/api/v1"
     agent_hub_token: str = ""  # 平台签发的团队专属 Bearer Token，不入 Git
     agent_hub_token_file: str = ""  # root-only 密钥文件路径（容器 /run/secrets/agent_hub_token），与 TOKEN 二选一
+    agent_hub_dashboard_url: str = ""  # 可选：覆盖 manifest 中的业务看板地址
     agent_hub_agent_key: str = "support.inspection-workflow"
     agent_hub_interval_minutes: int = 30  # 快照上报间隔（分钟）
     agent_hub_run_on_startup: bool = True  # 应用启动后先执行一次
