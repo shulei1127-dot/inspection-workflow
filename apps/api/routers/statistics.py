@@ -52,7 +52,7 @@ router = APIRouter(tags=["statistics"])
 _STATS_FIELD_IDS = ",".join([
     DISPATCH["记录时间"],
     DISPATCH["所属区域"],
-    DISPATCH["需求单号"],
+    DISPATCH["需求编号"],
     DISPATCH["邮件是否发送"],
     DISPATCH["巡检报告"],
     DISPATCH["巡检是否完成"],
@@ -165,7 +165,7 @@ def _aggregate_by_month(records: list[dict]) -> tuple[dict[str, dict], int]:
         agg = months.setdefault(month, _empty_month())
         agg["total"] += 1
 
-        demand = bool((extract_text(cells.get(DISPATCH["需求单号"])) or "").strip())
+        demand = bool((extract_text(cells.get(DISPATCH["需求编号"])) or "").strip())
         supplier = bool((extract_select_name(cells.get(DISPATCH["伙伴供应商"])) or "").strip())
         manager = bool((extract_engineer(cells.get(DISPATCH["伙伴负责人"])) or "").strip())
         engineer = bool((extract_engineer(cells.get(DISPATCH["工程师"])) or "").strip())
