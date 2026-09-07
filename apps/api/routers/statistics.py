@@ -14,10 +14,10 @@
 - 已闭环     = 工单是否闭环 = 是
 
 Endpoints:
-- GET /api/statistics/overview      — 月度核心指标
-- GET /api/statistics/by-region     — 月度区域分布
-- GET /api/statistics/by-status     — 月度派单/邮件状态（饼图，扇区合计=工单总数）
-- GET /api/statistics/monthly-trend — 近 6 个月工单量与闭环量
+- GET /api/statistics/overview      — 月/年核心指标（month 或 year 二选一）
+- GET /api/statistics/by-region     — 月/年区域分布
+- GET /api/statistics/by-status     — 月/年派单/邮件状态（饼图，扇区合计=范围工单总数）
+- GET /api/statistics/monthly-trend — 按月近 6 个月 / 按年 1-12 月趋势
 - GET /api/statistics/triggers      — 触发日志成功/失败统计（本地库，独立口径）
 """
 
@@ -197,6 +197,40 @@ def _aggregate_by_month(records: list[dict]) -> tuple[dict[str, dict], int]:
     return months, unattributed
 
 
+_AGG_KEYS = ("total", "dispatched", "dispatch_ready", "emailed", "email_na",
+             "email_ready", "report_missing", "completed", "closed")
+
+
+def _resolve_scope(month: str | None, year: str | None) -> tuple[str, str]:
+    """返回 (scope, value)；scope ∈ {month, year}，value 为 YYYY-MM 或 YYYY。"""
+    if month is not None:
+        return "month", _normalize_month(month)
+    if year is not None:
+        if not re.fullmatch(r"\d{4}", year):
+            raise HTTPException(status_code=400, detail="year 参数格式须为 YYYY")
+        return "year", year
+    return "month", _normalize_month(None)
+
+
+def _yearly_agg(months: dict[str, dict], year: str) -> dict:
+    """将某年各月聚合值累加为年度口径。"""
+    agg = _empty_month()
+    prefix = year + "-"
+    for month, m_agg in months.items():
+        if not month.startswith(prefix):
+            continue
+        for key in _AGG_KEYS:
+            agg[key] += m_agg[key]
+        agg["regions"] += m_agg["regions"]
+    return agg
+
+
+def _pick_agg(months: dict[str, dict], scope: str, value: str) -> dict:
+    if scope == "year":
+        return _yearly_agg(months, value)
+    return months.get(value, _empty_month())
+
+
 def _previous_months(month: str, count: int) -> list[str]:
     year, mon = int(month[:4]), int(month[5:7])
     months: list[str] = []
@@ -208,6 +242,13 @@ def _previous_months(month: str, count: int) -> list[str]:
             mon = 12
     months.reverse()
     return months
+
+
+def _trend_months(scope: str, value: str) -> list[str]:
+    """按月：近 6 个月；按年：该年 1-12 月。"""
+    if scope == "year":
+        return [f"{value}-{m:02d}" for m in range(1, 13)]
+    return _previous_months(value, 6)
 
 
 def _month_range(month: str) -> tuple[date, date]:
@@ -222,13 +263,14 @@ def _month_range(month: str) -> tuple[date, date]:
 
 @router.get("/api/statistics/overview")
 async def statistics_overview(
-    month: str | None = Query(None, description="YYYY-MM, defaults to current month"),
+    month: str | None = Query(None, description="YYYY-MM, 与 year 二选一，默认当前月"),
+    year: str | None = Query(None, description="YYYY, 全年口径"),
 ):
-    """月度核心指标（口径见模块注释，来源：钉钉客户巡检派单表）。"""
-    month = _normalize_month(month)
+    """核心指标：按所选月份或所选年份统计（来源：钉钉客户巡检派单表）。"""
+    scope, value = _resolve_scope(month, year)
     records = await _load_dispatch_records()
     months, unattributed = _aggregate_by_month(records)
-    agg = months.get(month, _empty_month())
+    agg = _pick_agg(months, scope, value)
 
     dispatched = agg["dispatched"]
     total = agg["total"]
@@ -236,7 +278,9 @@ async def statistics_overview(
     report_missing = agg["report_missing"]
 
     return {
-        "month": month,
+        "scope": scope,
+        "month": value if scope == "month" else None,
+        "year": value if scope == "year" else None,
         "total": total,
         "dispatched": dispatched,
         "pending_dispatch": total - dispatched,
@@ -254,29 +298,32 @@ async def statistics_overview(
 
 @router.get("/api/statistics/by-region")
 async def statistics_by_region(
-    month: str | None = Query(None, description="YYYY-MM"),
+    month: str | None = Query(None, description="YYYY-MM, 与 year 二选一"),
+    year: str | None = Query(None, description="YYYY, 全年口径"),
 ):
-    """月度区域分布。"""
-    month = _normalize_month(month)
+    """区域分布：按所选月份或年份统计。"""
+    scope, value = _resolve_scope(month, year)
     records = await _load_dispatch_records()
     months, _ = _aggregate_by_month(records)
-    agg = months.get(month, _empty_month())
+    agg = _pick_agg(months, scope, value)
     items = [
         {"region": region, "count": count}
         for region, count in agg["regions"].most_common()
     ]
-    return {"month": month, "items": items}
+    return {"scope": scope, "month": value if scope == "month" else None,
+            "year": value if scope == "year" else None, "items": items}
 
 
 @router.get("/api/statistics/by-status")
 async def statistics_by_status(
-    month: str | None = Query(None, description="YYYY-MM"),
+    month: str | None = Query(None, description="YYYY-MM, 与 year 二选一"),
+    year: str | None = Query(None, description="YYYY, 全年口径"),
 ):
-    """月度派单状态 + 邮件状态（饼图口径，扇区合计等于工单总数）。"""
-    month = _normalize_month(month)
+    """派单状态 + 邮件状态（饼图口径，扇区合计等于所选范围工单总数）。"""
+    scope, value = _resolve_scope(month, year)
     records = await _load_dispatch_records()
     months, _ = _aggregate_by_month(records)
-    agg = months.get(month, _empty_month())
+    agg = _pick_agg(months, scope, value)
 
     total = agg["total"]
     dispatched = agg["dispatched"]
@@ -296,24 +343,23 @@ async def statistics_by_status(
     if agg["email_na"] > 0:
         email_status.append({"status": "不涉及", "count": agg["email_na"]})
 
-    return {
-        "month": month,
-        "dispatch_status": dispatch_status,
-        "email_status": email_status,
-    }
+    return {"scope": scope, "month": value if scope == "month" else None,
+            "year": value if scope == "year" else None,
+            "dispatch_status": dispatch_status, "email_status": email_status}
 
 
 @router.get("/api/statistics/monthly-trend")
 async def statistics_monthly_trend(
-    month: str | None = Query(None, description="YYYY-MM, ends at the given month"),
+    month: str | None = Query(None, description="YYYY-MM, 与 year 二选一"),
+    year: str | None = Query(None, description="YYYY, 全年口径（返回该年 1-12 月）"),
 ):
-    """近 6 个月（含所选月份）工单量与闭环量趋势。"""
-    month = _normalize_month(month)
+    """趋势：按月=近 6 个月；按年=所选年 1-12 月。"""
+    scope, value = _resolve_scope(month, year)
     records = await _load_dispatch_records()
     months, _ = _aggregate_by_month(records)
 
     items = []
-    for m in _previous_months(month, 6):
+    for m in _trend_months(scope, value):
         agg = months.get(m, _empty_month())
         items.append({
             "month": m,
@@ -322,7 +368,8 @@ async def statistics_monthly_trend(
             "emailed": agg["emailed"],
             "closed": agg["closed"],
         })
-    return {"month": month, "items": items}
+    return {"scope": scope, "month": value if scope == "month" else None,
+            "year": value if scope == "year" else None, "items": items}
 
 
 @router.get("/api/statistics/triggers")

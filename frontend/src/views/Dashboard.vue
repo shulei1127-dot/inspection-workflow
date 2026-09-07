@@ -4,19 +4,36 @@
       <div>
         <h1>数据概览</h1>
         <div class="dashboard-meta">
-          数据源：钉钉《客户巡检派单》表 · 按记录时间月份归集
+          数据源：钉钉《客户巡检派单》表 · 按月/按年归集
           <span class="muted">｜待派单=需求单号未填写｜待发邮件=未发送且未标记「不涉及」</span>
         </div>
       </div>
-      <el-date-picker
-        v-model="selectedMonth"
-        type="month"
-        placeholder="选择月份"
-        format="YYYY-MM"
-        value-format="YYYY-MM"
-        @change="loadAll"
-        size="default"
-      />
+      <div class="scope-picker">
+        <el-radio-group v-model="scopeMode" size="default" @change="onScopeChange">
+          <el-radio-button value="month">按月</el-radio-button>
+          <el-radio-button value="year">全年</el-radio-button>
+        </el-radio-group>
+        <el-date-picker
+          v-if="scopeMode === 'month'"
+          v-model="selectedMonth"
+          type="month"
+          placeholder="选择月份"
+          format="YYYY-MM"
+          value-format="YYYY-MM"
+          @change="loadAll"
+          size="default"
+        />
+        <el-date-picker
+          v-else
+          v-model="selectedYear"
+          type="year"
+          placeholder="选择年份"
+          format="YYYY"
+          value-format="YYYY"
+          @change="loadAll"
+          size="default"
+        />
+      </div>
     </div>
 
     <el-alert
@@ -32,7 +49,7 @@
     <!-- Stat cards -->
     <div class="stat-row">
       <div class="stat-card kpi-main">
-        <div class="label">工单总数（{{ monthLabel }}）</div>
+        <div class="label">工单总数（{{ scopeLabel }}）</div>
         <div class="value primary">{{ overview.total ?? '-' }}</div>
         <div class="sub">巡检完成 {{ overview.completed ?? '-' }} · 已闭环 {{ overview.closed ?? '-' }}</div>
       </div>
@@ -78,7 +95,7 @@
         <div ref="regionChartRef" class="chart-container"></div>
       </div>
       <div class="chart-card chart-full">
-        <h3>月度趋势（近 6 个月）</h3>
+        <h3>{{ trendTitle }}</h3>
         <div ref="trendChartRef" class="chart-container"></div>
       </div>
     </div>
@@ -91,7 +108,9 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import * as echarts from 'echarts'
 import { getOverview, getByRegion, getByStatus, getMonthlyTrend, createEventStream } from '../api'
 
+const scopeMode = ref<'month' | 'year'>('month')
 const selectedMonth = ref<string>('')
+const selectedYear = ref<string>(String(new Date().getFullYear()))
 const overview = ref<Record<string, any>>({})
 const errorMsg = ref('')
 
@@ -103,7 +122,17 @@ const trendChartRef = ref<HTMLElement>()
 const chartInstances = new Map<string, echarts.ECharts>()
 let ws: WebSocket | null = null
 
-const monthLabel = computed(() => {
+const trendTitle = computed(() => {
+  if (scopeMode.value === 'year') {
+    return `${selectedYear.value || currentYear()} 年 1-12 月趋势`
+  }
+  return '近 6 个月趋势'
+})
+
+const scopeLabel = computed(() => {
+  if (scopeMode.value === 'year') {
+    return `${selectedYear.value || currentYear()}年`
+  }
   const [y, m] = (selectedMonth.value || currentMonth()).split('-')
   return `${y}年${Number(m)}月`
 })
@@ -111,6 +140,21 @@ const monthLabel = computed(() => {
 function currentMonth() {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+}
+
+function currentYear() {
+  return String(new Date().getFullYear())
+}
+
+function scopeParams() {
+  if (scopeMode.value === 'year') {
+    return { month: undefined, year: selectedYear.value || currentYear() }
+  }
+  return { month: selectedMonth.value || currentMonth(), year: undefined }
+}
+
+function onScopeChange() {
+  loadAll()
 }
 
 function mountChart(key: string, el: HTMLElement | undefined): echarts.ECharts | null {
@@ -229,25 +273,25 @@ function renderTrendChart(items: any[]) {
 }
 
 async function loadAll() {
-  const month = selectedMonth.value || currentMonth()
+  const { month, year } = scopeParams()
   errorMsg.value = ''
   let failures = 0
 
   try {
-    overview.value = await getOverview(month)
+    overview.value = await getOverview(month, year)
   } catch (e: any) {
     failures += 1
     console.error('overview failed', e)
   }
   try {
-    const region: any = await getByRegion(month)
+    const region: any = await getByRegion(month, year)
     renderRegionChart(region.items || [])
   } catch (e: any) {
     failures += 1
     console.error('by-region failed', e)
   }
   try {
-    const status: any = await getByStatus(month)
+    const status: any = await getByStatus(month, year)
     renderDispatchChart(status.dispatch_status || [])
     renderEmailChart(status.email_status || [])
   } catch (e: any) {
@@ -255,7 +299,7 @@ async function loadAll() {
     console.error('by-status failed', e)
   }
   try {
-    const trend: any = await getMonthlyTrend(month)
+    const trend: any = await getMonthlyTrend(month, year)
     renderTrendChart(trend.items || [])
   } catch (e: any) {
     failures += 1
@@ -266,6 +310,7 @@ async function loadAll() {
     errorMsg.value = '部分数据加载失败，请稍后刷新重试'
   }
 }
+
 
 function renderDispatchChart(items: any[]) {
   renderPieChart('dispatch', dispatchChartRef.value, items, {
@@ -327,6 +372,12 @@ onBeforeUnmount(() => {
 
 .dashboard-alert {
   margin-bottom: 16px;
+}
+
+.scope-picker {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .stat-card .value.primary {

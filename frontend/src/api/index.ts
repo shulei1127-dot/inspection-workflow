@@ -20,17 +20,25 @@ export async function postJson<T = any>(url: string, body?: any): Promise<T> {
 }
 
 // ── Statistics ──
-export const getOverview = (month?: string) =>
-  fetchJson('/api/statistics/overview' + (month ? `?month=${month}` : ''))
+function statsQuery(month?: string, year?: string): string {
+  const qs = new URLSearchParams()
+  if (month) qs.set('month', month)
+  if (year) qs.set('year', year)
+  const s = qs.toString()
+  return s ? `?${s}` : ''
+}
 
-export const getByRegion = (month?: string) =>
-  fetchJson('/api/statistics/by-region' + (month ? `?month=${month}` : ''))
+export const getOverview = (month?: string, year?: string) =>
+  fetchJson('/api/statistics/overview' + statsQuery(month, year))
 
-export const getByStatus = (month?: string) =>
-  fetchJson('/api/statistics/by-status' + (month ? `?month=${month}` : ''))
+export const getByRegion = (month?: string, year?: string) =>
+  fetchJson('/api/statistics/by-region' + statsQuery(month, year))
 
-export const getMonthlyTrend = (month?: string) =>
-  fetchJson('/api/statistics/monthly-trend' + (month ? `?month=${month}` : ''))
+export const getByStatus = (month?: string, year?: string) =>
+  fetchJson('/api/statistics/by-status' + statsQuery(month, year))
+
+export const getMonthlyTrend = (month?: string, year?: string) =>
+  fetchJson('/api/statistics/monthly-trend' + statsQuery(month, year))
 
 export const getTriggers = (month?: string) =>
   fetchJson('/api/statistics/triggers' + (month ? `?month=${month}` : ''))
