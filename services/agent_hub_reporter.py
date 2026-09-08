@@ -44,7 +44,7 @@ METRIC_KEYS = (
 _AGENT_MANIFEST: dict = {
     "schema_version": "v1",
     "agent_key": "support.inspection-workflow",
-    "display_name": "巡检工单流程自动化运行助手",
+    "display_name": "主动服务流程自动化运行助手",
     "description": "巡检工单流程自动化服务运行在内部 dev-box（10.2.36.228:8100），覆盖巡检工单 PTS 同步、钉钉巡检派单表维护、交付转售后自动审核、巡检报告邮件预分析、工单闭环推进与巡检信息库回写等运营链路。服务对象为巡检运营、售后与交付团队；输入为 PTS 工单数据与钉钉派单表状态，输出为脱敏聚合运行指标与看板，业务明细与客户原文保留在原系统权限边界内，不向 Agent Hub 上报。",
     "owner": "舒磊｜巡检工单流程自动化负责人",
     "dashboard_url": "http://10.2.36.228:8100/",
