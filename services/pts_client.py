@@ -87,10 +87,16 @@ def _inline_variables(query: str, variables: dict | None = None) -> str:
     return result
 
 
-async def pts_graphql_query(query: str, variables: dict | None = None, max_retries: int = 3) -> dict:
+async def pts_graphql_query(
+    query: str,
+    variables: dict | None = None,
+    max_retries: int = 3,
+    timeout: float = 90.0,
+) -> dict:
     """Send a GraphQL query to PTS API with Bearer token auth.
 
-    Retries up to max_retries times on 429 (rate limit) with exponential backoff.
+    Retries up to max_retries times on 429 (rate limit) and transient
+    transport errors (timeouts / connection resets) with exponential backoff.
     """
     inlined_query = _inline_variables(query, variables)
     settings = get_settings()
@@ -98,15 +104,26 @@ async def pts_graphql_query(query: str, variables: dict | None = None, max_retri
     for attempt in range(max_retries + 1):
         await _rate_limit()
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                settings.pts_graphql_url,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {settings.pts_api_token}",
-                },
-                json={"query": inlined_query},
-            )
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    settings.pts_graphql_url,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {settings.pts_api_token}",
+                    },
+                    json={"query": inlined_query},
+                )
+        except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+            if attempt < max_retries:
+                wait = 5 * (2 ** attempt)  # 5s, 10s, 20s
+                logger.warning(
+                    "PTS API 请求超时/连接异常 (%s)，%ds 后重试 (attempt %d/%d)",
+                    exc.__class__.__name__, wait, attempt + 1, max_retries,
+                )
+                await asyncio.sleep(wait)
+                continue
+            raise RuntimeError(f"PTS API 请求超时/连接异常: {exc}") from exc
 
         if resp.status_code == 401:
             raise PermissionError("PTS API 令牌无效或已过期")
@@ -195,7 +212,7 @@ async def query_inspection_work_orders(sync_month: str) -> list[dict]:
 
     all_items = []
     skip = 0
-    limit = 50
+    limit = 100
     past_target_month = False
 
     while True:
