@@ -18,6 +18,19 @@ def _is_saas_or_service(category: str) -> bool:
     return False
 
 
+def _has_non_probe_module(config_text: str) -> bool:
+    """配置项文本（模块名*数量，多个模块用 + 连接）中是否含非探针模块。
+
+    探针类模块（如 探针-M100、探针-系统）是独立硬件探针，不需要创建产品实例；
+    但当同一配置项同时含订阅模块与探针（如 "M100系统 (订阅 / 年)*1 + 探针-M100*15"）时，
+    该配置项代表 1 套订阅产品，不能整行排除。
+    """
+    parts = [p.strip() for p in (config_text or "").split("+") if p.strip()]
+    if not parts:
+        return True
+    return any("探针" not in p for p in parts)
+
+
 def rule6_product_count(delivery_items: list[DeliveryItem], product_details: list[ProductInfo]) -> RuleResult:
     # SaaS/运营服务/续保类交付项不用校验产品个数
     non_device_items: list[DeliveryItem] = []
@@ -38,7 +51,7 @@ def rule6_product_count(delivery_items: list[DeliveryItem], product_details: lis
             qty = sum(
                 ci.quantity or 1
                 for ci in item.config_items
-                if "探针" not in (ci.text or "")
+                if _has_non_probe_module(ci.text)
             )
             if qty > 0:
                 config_count[name] = config_count.get(name, 0) + qty

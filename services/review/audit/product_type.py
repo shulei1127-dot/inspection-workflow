@@ -7,6 +7,7 @@ from services.review.audit.schemas import ProductInfo, ProductType
 SAAS_KEYWORDS = [
     "云图", "百川云", "大观", "无锋", "MSS标准版",
     "互联网暴露面检测评估服务", "虚拟坐席重保版", "产品运营服务",
+    "智能编程助手", "monkeycode",
 ]
 HARDWARE_KEYWORDS = ["硬件版", "硬件租用版"]
 SOFTWARE_KEYWORDS = ["软件版", "软件订阅版"]

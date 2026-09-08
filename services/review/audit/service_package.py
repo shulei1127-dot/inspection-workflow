@@ -12,16 +12,22 @@ _KNOWN_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"标准服务包（续保/月）\*(\d+)"), "standard_renewal_month"),
     (re.compile(r"高级服务包（续保一）\*(\d+)"), "advanced_renewal1"),
     (re.compile(r"高级服务包（续保二）\*(\d+)"), "advanced_renewal2"),
+    (re.compile(r"(?:HW|硬件)套餐\*(\d+)"), "subscription_year"),
+    (re.compile(r"年租版\*(\d+)"), "subscription_year"),
+    (re.compile(r"升级授权[（(](\d+)年[）)]\s*\*?(\d*)"), "subscription_year"),
     (re.compile(r"设备租赁.*?月.*?\*(\d+)"), "rental_month"),
     (re.compile(r"设备租用.*?月.*?\*(\d+)"), "rental_month"),
-    (re.compile(r"订阅.*?年\*(\d+)"), "subscription_year"),
+    (re.compile(r"订阅.*?年\s*\)?\s*\*(\d+)"), "subscription_year"),
     (re.compile(r"产品巡检服务.*?(\d+)次"), "inspection"),
-    (re.compile(r"产品巡检服务（套）.*?(\d+)套"), "inspection_set"),
+    (re.compile(r"产品巡检服务（套）\*(\d+)"), "inspection_set"),
     (re.compile(r"日志分析服务.*?(\d+)次"), "log_analysis"),
     (re.compile(r"互联网暴露面检测评估服务"), "operation_service"),
     (re.compile(r"产品运营服务"), "operation_service"),
     (re.compile(r"（服务框架）单次服务"), "operation_service"),
 ]
+
+# 无显式年限但属于订阅/租用形态的模块：每个模块按 1 年计（如 单机租用版/年租版）
+_RENTAL_FORM_KEYWORDS = ("订阅", "租用", "年租", "单机租用版")
 
 
 def parse_service_packages(config_text: str) -> ServicePackageResult:
@@ -38,6 +44,10 @@ def parse_service_packages(config_text: str) -> ServicePackageResult:
                 n = int(m.group(1)) if m.lastindex else 0
                 _apply_category(result, category, n)
                 break
+        if not matched and any(kw in part for kw in _RENTAL_FORM_KEYWORDS):
+            # 订阅/租用形态但未带显式年限：按 1 年计
+            result.years += 1
+            matched = True
         if not matched and not _is_known_non_service_part(part):
             result.unrecognized.append(part)
 
@@ -77,11 +87,11 @@ def _apply_category(result: ServicePackageResult, category: str, n: int) -> None
 
 
 def _is_known_non_service_part(part: str) -> bool:
-    if re.match(r"^[A-Z]{2,3}-[A-Z0-9]+", part):
+    if re.match(r"^[A-Za-z]{2,8}-[A-Za-z0-9]+", part):
         return True
     if re.match(r"^\*?\d+$", part):
         return True
-    if "安装服务包" in part:
+    if any(kw in part for kw in ("探针", "安装服务包", "上门支持服务", "文件防篡改功能")):
         return True
     if "-系统*" in part or "-设备*" in part:
         return True

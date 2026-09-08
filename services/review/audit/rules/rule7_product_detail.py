@@ -150,9 +150,8 @@ def _check_license(product: ProductInfo) -> list[str]:
     elif product.license_type not in VALID_LICENSE_TYPES:
         issues.append('License性质非"正式交付-永久"或"正式交付-非永久"')
 
-    is_permanent = product.license_type in ("formal_delivery_permanent", "正式交付-永久", "permanent", "永久")
-    if _is_empty(product.license_expiry) and not is_permanent:
-        issues.append("无License有效期")
+    # License 有效期不参与审核：租用/订阅场景下，服务年限以配置项表达、
+    # 售后有效服务期由规则8校验，正式交付-非永久的 license 有效期不强制要求填写
     if _is_empty(product.license_id):
         issues.append("无License ID")
     return issues
