@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["oauth"])
 
 SESSION_COOKIE = "iw_session"
-STATE_COOKIE = "iw_oauth_state"
 COOKIE_PATH = "/"
 
 
@@ -56,11 +55,12 @@ async def oauth_login(request: Request, next: str = "/"):
     if settings is None:
         return HTMLResponse("认证未启用（OIDC_ENABLED=false）", status_code=503)
 
-    state = security.generate_state()
     safe_next = sanitize_next_path(next)
     secret = settings.oidc_cookie_signing_secret()
+    # 无状态 state：签名后随授权请求带给 IdP，回调时验签即可。
+    # 不依赖 cookie，因此支持"从 IP 发起登录 -> IdP -> 域名回调"的跨主机流程。
     state_token = security.sign_token(
-        {"state": state, "next": safe_next},
+        {"next": safe_next},
         secret,
         ttl_seconds=settings.oidc_state_ttl_seconds,
     )
@@ -69,21 +69,10 @@ async def oauth_login(request: Request, next: str = "/"):
         "client_id": settings.oidc_client_id,
         "redirect_uri": settings.oidc_redirect_uri,
         "scope": settings.oidc_scope,
-        "state": state,
+        "state": state_token,
     }
     auth_url = f"{settings.oidc_authorize_url}?{urllib.parse.urlencode(params)}"
-    response = RedirectResponse(auth_url, status_code=302)
-    secure = _is_https_request(request)
-    response.set_cookie(
-        STATE_COOKIE,
-        state_token,
-        path=COOKIE_PATH,
-        max_age=settings.oidc_state_ttl_seconds,
-        httponly=True,
-        samesite="lax",
-        secure=secure,
-    )
-    return response
+    return RedirectResponse(auth_url, status_code=302)
 
 
 @router.get("/oauth/callback")
@@ -102,9 +91,8 @@ async def oauth_callback(
         return RedirectResponse("/oauth/login?error=denied", status_code=302)
 
     secret = settings.oidc_cookie_signing_secret()
-    state_token = request.cookies.get(STATE_COOKIE)
-    parsed = security.verify_token(state_token, secret) if state_token else None
-    if not parsed or not secrets.compare_digest(str(parsed.get("state", "")), state):
+    parsed = security.verify_token(state, secret)
+    if not parsed:
         logger.warning("OAuth callback state mismatch")
         return RedirectResponse("/oauth/login?error=state", status_code=302)
     safe_next = sanitize_next_path(str(parsed.get("next") or "/"))
@@ -167,7 +155,6 @@ async def oauth_callback(
         samesite="lax",
         secure=secure,
     )
-    response.delete_cookie(STATE_COOKIE, path=COOKIE_PATH, secure=secure)
     logger.info("OAuth login success user=%s", session["username"] or session["sub"])
     return response
 
@@ -178,7 +165,6 @@ async def oauth_logout(request: Request):
     response = RedirectResponse("/oauth/login", status_code=302)
     secure = _is_https_request(request)
     response.delete_cookie(SESSION_COOKIE, path=COOKIE_PATH, secure=secure)
-    response.delete_cookie(STATE_COOKIE, path=COOKIE_PATH, secure=secure)
     return response
 
 

@@ -30,6 +30,21 @@ def is_public_path(path: str) -> bool:
     return any(path.startswith(prefix) for prefix in _PUBLIC_PREFIXES)
 
 
+def _is_trusted_local_client(host: str | None) -> bool:
+    """Loopback / docker bridge callers (host ops, scheduler probes) are trusted."""
+    if not host:
+        return False
+    if host in {"127.0.0.1", "::1", "localhost"}:
+        return True
+    parts = host.split(".")
+    if len(parts) == 4 and parts[0] == "172":
+        try:
+            return 16 <= int(parts[1]) <= 31
+        except ValueError:
+            return False
+    return False
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     """Redirect browsers to /oauth/login; answer API callers with 401 JSON."""
 
@@ -43,6 +58,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         path = request.url.path
         if request.method == "OPTIONS" or is_public_path(path):
+            return await call_next(request)
+        if _is_trusted_local_client(request.client.host if request.client else None):
             return await call_next(request)
 
         secret = settings.oidc_cookie_signing_secret()
