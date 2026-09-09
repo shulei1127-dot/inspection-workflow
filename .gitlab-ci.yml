@@ -12,7 +12,9 @@ test:
     - pip install --quiet -r requirements.txt
   script:
     - python -m py_compile core/config.py scheduler/jobs.py services/agent_hub_reporter.py
+    - python -m py_compile core/security.py apps/api/auth_middleware.py apps/api/routers/oauth.py apps/api/main.py
     - python -m unittest tests.test_agent_hub_reporter -v
+    - python -m unittest tests.test_oauth_security -v
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "feature/review-audit-module"'

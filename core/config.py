@@ -125,6 +125,16 @@ class Settings(BaseSettings):
     daily_change_summary_repo_path: str = "/app"  # Git 仓库路径（容器内）
     daily_change_summary_webhook_url: str = ""  # 变更摘要钉钉机器人 webhook（空则用默认）
 
+    # OIDC auth (公司内部统一认证 auth.chaitin.net)
+    oidc_enabled: bool = False  # 是否启用访问认证（默认关闭，不影响线上）
+    oidc_base_url: str = "https://auth.chaitin.net"  # IdP 根地址
+    oidc_client_id: str = ""  # 应用客户端 ID（工单申请获得）
+    oidc_client_secret: str = ""  # 客户端密钥（只放服务器 env，不入 Git）
+    oidc_redirect_uri: str = ""  # 回调地址，须与注册完全一致
+    oidc_scope: str = "openid profile email"
+    oidc_cookie_secret: str = ""  # 会话 cookie 签名密钥（空则回退 client_secret）
+    oidc_session_ttl_hours: int = 8  # 登录会话有效期（小时）
+    oidc_state_ttl_seconds: int = 600  # OAuth state 有效期（秒）
 
     # Agent Hub (support-ai 纳管平台快照上报，默认关闭)
     agent_hub_enabled: bool = False  # 总开关（默认关闭，不影响线上）
@@ -158,6 +168,40 @@ class Settings(BaseSettings):
             else:
                 self.pts_upload_url = base.replace("/query", "/api/upload")
         return self
+
+    @model_validator(mode="after")
+    def _check_oidc_config(self) -> "Settings":
+        """启用认证时校验必需配置，缺项直接启动失败以便尽早发现。"""
+        if not self.oidc_enabled:
+            return self
+        missing = [
+            name
+            for name, value in (
+                ("OIDC_CLIENT_ID", self.oidc_client_id),
+                ("OIDC_CLIENT_SECRET", self.oidc_client_secret),
+                ("OIDC_REDIRECT_URI", self.oidc_redirect_uri),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(f"OIDC 认证已启用但缺少配置: {', '.join(missing)}")
+        return self
+
+    @property
+    def oidc_authorize_url(self) -> str:
+        return self.oidc_base_url.rstrip("/") + "/oauth2/auth"
+
+    @property
+    def oidc_token_url(self) -> str:
+        return self.oidc_base_url.rstrip("/") + "/oauth2/token"
+
+    @property
+    def oidc_userinfo_url(self) -> str:
+        return self.oidc_base_url.rstrip("/") + "/userinfo"
+
+    def oidc_cookie_signing_secret(self) -> str:
+        """Cookie 签名密钥：优先显式配置，其次回退 client_secret。"""
+        return (self.oidc_cookie_secret or self.oidc_client_secret or "").strip()
 
 
 @lru_cache(maxsize=1)

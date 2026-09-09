@@ -7,11 +7,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from apps.api.routers import change_logs, email_tool, health, inspection_library, monitor, review, sales_confirm, statistics, sync, task_logs, triggers, visit, work_orders
+from apps.api.routers import change_logs, email_tool, health, inspection_library, monitor, oauth, review, sales_confirm, statistics, sync, task_logs, triggers, visit, work_orders
 from apps.api.routers import ws as websocket
 from core.config import get_settings
 from core.db import create_all
 from core.logging import configure_logging
+from apps.api.auth_middleware import AuthMiddleware
 
 STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
 
@@ -62,6 +63,8 @@ app = FastAPI(
     debug=settings.log_level == "DEBUG",
 )
 
+app.add_middleware(AuthMiddleware)
+
 # Register API routers
 app.include_router(health.router)
 app.include_router(sync.router)
@@ -77,6 +80,7 @@ app.include_router(visit.router)
 app.include_router(change_logs.router)
 app.include_router(inspection_library.router)
 app.include_router(task_logs.router)
+app.include_router(oauth.router)
 
 # Serve frontend static files (built Vue app)
 if STATIC_DIR.is_dir() and (STATIC_DIR / "index.html").exists():
