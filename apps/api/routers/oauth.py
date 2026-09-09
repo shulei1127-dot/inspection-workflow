@@ -187,6 +187,10 @@ async def oauth_callback(
     return response
 
 
+# IdP 注册的回调地址是 /callback（与 /oauth/callback 同一处理逻辑）
+router.add_api_route("/callback", oauth_callback, methods=["GET"], include_in_schema=False)
+
+
 @router.get("/oauth/logout")
 async def oauth_logout(request: Request):
     """Clear session cookies and go back to the login entry."""

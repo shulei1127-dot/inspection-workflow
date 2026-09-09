@@ -19,7 +19,13 @@ logger = logging.getLogger(__name__)
 SESSION_COOKIE = "iw_session"
 
 # Paths reachable without a session (OAuth entry/exit + health).
-_PUBLIC_EXACT = {"/oauth/login", "/oauth/callback", "/oauth/logout", "/favicon.ico"}
+_PUBLIC_EXACT = {
+    "/oauth/login",
+    "/oauth/callback",
+    "/oauth/logout",
+    "/callback",  # IdP 注册的回调路径（https://proactiflow.in.chaitin.net/callback）
+    "/favicon.ico",
+}
 _PUBLIC_PREFIXES = ("/api/health",)
 
 
