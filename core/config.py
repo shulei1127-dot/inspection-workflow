@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     sales_confirm_cron: str = "0 9 * * *"  # 每天9点推送
     sales_confirm_dry_run: bool = True  # 是否仅扫描不发送（默认开启，避免误发）
 
+    # Group bot sync (巡检群自动拉机器人：扫描派单表群ID -> 拉增值服务机器人入群)
+    group_bot_sync_enabled: bool = False  # 总开关（默认关闭）
+    group_bot_sync_cron: str = "0 9,11,13,15,17,19 * * *"  # 工作日 9:00-19:00 每2小时扫描
+    group_bot_sync_execute: bool = False  # 是否真正执行拉机器人（默认 False=只扫描记录，不执行）
+
     # Visit (交付转售后回访闭环)
     visit_pipeline_enabled: bool = False  # 回访流水线总开关（默认关闭）
     visit_pipeline_cron: str = "0 17 * * *"  # 回访定时任务 cron

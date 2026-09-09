@@ -159,6 +159,25 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
             registered_ids.append("sales-confirm:push")
             logger.info("Registered sales confirm job with cron: %s", sales_confirm_cron)
 
+    # Group bot sync job (巡检群自动拉机器人：工作日 9-19 每2小时扫描，默认关闭)
+    if settings.group_bot_sync_enabled:
+        group_bot_cron = settings.group_bot_sync_cron.strip()
+        if group_bot_cron:
+            scheduler.add_job(
+                _run_group_bot_sync_job,
+                trigger=CronTrigger.from_crontab(group_bot_cron, timezone=tz),
+                id="group-bot:sync",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
+            registered_ids.append("group-bot:sync")
+            logger.info(
+                "Registered group bot sync job with cron: %s (execute=%s)",
+                group_bot_cron,
+                settings.group_bot_sync_execute,
+            )
+
     # Daily change summary job
     if settings.daily_change_summary_enabled:
         daily_summary_cron = settings.daily_change_summary_cron.strip()
@@ -563,6 +582,33 @@ def _run_sales_confirm_job() -> None:
         )
     except Exception as e:
         logger.exception("Scheduled sales confirm job failed: %s", e)
+
+
+def _run_group_bot_sync_job() -> None:
+    """Scheduled group bot sync job (巡检群自动拉机器人).
+
+    仅国家法定工作日 9:00-19:00 每2小时执行（cron 控制时刻，
+    服务内部再做工作日兜底判断）；execute 默认 False 只扫描不拉群。
+    """
+    settings = get_settings()
+    from services.group_bot_sync_service import run_group_bot_sync
+
+    try:
+        result = asyncio.run(run_group_bot_sync(execute=settings.group_bot_sync_execute))
+        logger.info(
+            "Scheduled group bot sync job completed: status=%s scanned=%d with_group=%d already=%d to_add=%d would_add=%d added=%d failed=%d execute=%s",
+            result.get("status", "ok"),
+            result.get("scanned", 0),
+            result.get("with_group", 0),
+            result.get("already_in_group", 0),
+            result.get("to_add", 0),
+            result.get("would_add", 0),
+            result.get("added", 0),
+            result.get("failed", 0),
+            result.get("execute", False),
+        )
+    except Exception as e:
+        logger.exception("Scheduled group bot sync job failed: %s", e)
 
 
 def _run_inspection_library_job() -> None:
