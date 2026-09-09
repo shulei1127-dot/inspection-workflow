@@ -131,7 +131,7 @@ class Settings(BaseSettings):
     oidc_client_id: str = ""  # 应用客户端 ID（工单申请获得）
     oidc_client_secret: str = ""  # 客户端密钥（只放服务器 env，不入 Git）
     oidc_redirect_uri: str = ""  # 回调地址，须与注册完全一致
-    oidc_scope: str = "openid profile"  # 注册时申请的 scope 为 profile
+    oidc_scope: str = "profile"  # 运维注册的 client 仅允许 scope=profile（不允许 openid）
     oidc_cookie_secret: str = ""  # 会话 cookie 签名密钥（空则回退 client_secret）
     oidc_session_ttl_hours: int = 8  # 登录会话有效期（小时）
     oidc_state_ttl_seconds: int = 600  # OAuth state 有效期（秒）
