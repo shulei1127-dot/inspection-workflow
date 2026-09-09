@@ -5,7 +5,6 @@ access_token -> /userinfo -> signed session cookie -> back to app.
 """
 
 import logging
-import secrets
 import urllib.parse
 
 import httpx
