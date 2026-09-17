@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     inspection_library_cron: str = "0 18 * * *"  # 每天18点同步信息库并回写缺失地址/邮箱
 
     # Scheduler
-    sync_cron: str = "0 16 * * *"
+    sync_cron: str = "15 16 * * *"  # 错开16:00邮件探测和16:05审核任务
     email_probe_cron: str = "0 */2 * * *"  # 每2小时探测一次待发邮件数据
     closure_check_cron: str = "0 20 * * *"  # 每天20点检测未闭环工单（基于邮件是否发送触发）
     scheduler_enabled: bool = True

@@ -95,8 +95,8 @@ async def pts_graphql_query(
 ) -> dict:
     """Send a GraphQL query to PTS API with Bearer token auth.
 
-    Retries up to max_retries times on 429 (rate limit) and transient
-    transport errors (timeouts / connection resets) with exponential backoff.
+    Retries up to max_retries times on 429, HTTP 5xx, transient transport
+    errors, and timeout-style errors returned by the GraphQL gateway.
     """
     inlined_query = _inline_variables(query, variables)
     settings = get_settings()
@@ -134,17 +134,48 @@ async def pts_graphql_query(
                 await asyncio.sleep(wait)
                 continue
             raise RuntimeError("PTS API 请求过于频繁，请稍后再试")
+        if resp.status_code >= 500 and attempt < max_retries:
+            wait = 5 * (2 ** attempt)
+            logger.warning(
+                "PTS API temporary HTTP %d，%ds 后重试 (attempt %d/%d)",
+                resp.status_code, wait, attempt + 1, max_retries,
+            )
+            await asyncio.sleep(wait)
+            continue
         if resp.status_code != 200:
             raise RuntimeError(f"PTS API 返回 HTTP {resp.status_code}: {resp.text[:200]}")
 
         data = resp.json()
         if data.get("errors"):
             error_msg = data["errors"][0].get("message", str(data["errors"]))
+            if _is_retryable_graphql_error(error_msg) and attempt < max_retries:
+                wait = 5 * (2 ** attempt)
+                logger.warning(
+                    "PTS GraphQL 网关临时异常，%ds 后重试 (attempt %d/%d): %s",
+                    wait, attempt + 1, max_retries, error_msg,
+                )
+                await asyncio.sleep(wait)
+                continue
             raise RuntimeError(f"GraphQL 错误: {error_msg}")
 
         return data.get("data", {})
 
     raise RuntimeError("PTS API 请求过于频繁，请稍后再试")
+
+
+def _is_retryable_graphql_error(message: object) -> bool:
+    """Return whether a GraphQL error represents a transient gateway failure."""
+    text = str(message).lower()
+    transient_markers = (
+        "context deadline exceeded",
+        "client.timeout exceeded",
+        "deadline exceeded",
+        "temporarily unavailable",
+        "service unavailable",
+        "upstream connect error",
+        "connection reset",
+    )
+    return any(marker in text for marker in transient_markers)
 
 
 async def verify_pts_token() -> bool:

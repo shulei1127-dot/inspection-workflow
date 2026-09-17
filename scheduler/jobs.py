@@ -1,7 +1,7 @@
 """APScheduler job registration for inspection workflow.
 
 Jobs:
-- Sync job: PTS → local DB → DingTalk AITable (daily at 16:00)
+- Sync job: PTS → local DB → DingTalk AITable (daily at configured time)
 - Dispatch monitor: 客户巡检派单 AITable poll (every 2 hours)
 - Email pre-analysis: pre-analyze email-pending records (daily at 9:00)
 - Closure check: auto-close PTS work orders (daily at 10:00)
