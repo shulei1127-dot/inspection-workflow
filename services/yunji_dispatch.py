@@ -32,7 +32,7 @@ def _parse_supplier_short_name(name: str) -> str:
 
 
 SUPPLIER_MAP = {
-    "平云": "成都平云小匠网络有限公司",
+    "平云": "广州平云数安科技服务有限公司",
     "腾云": "深圳市腾云智服科技有限公司",
     "禹赫": "上海禹赫信息技术有限公司",
     "中朔": "上海中朔信息科技有限公司",
@@ -277,11 +277,19 @@ async def create_yunji_requirement(
 
     Returns: {demandId, orderId, projectName, supplierName, ...}
     """
+    if not supplier_short_name or not supplier_short_name.strip():
+        raise RuntimeError("供应商名称为空，已阻止创建云集需求")
+
     order_id = _parse_pts_order_id(pts_order_id)
     short_name = _parse_supplier_short_name(supplier_short_name)
     supplier_full_name = SUPPLIER_MAP.get(short_name, supplier_short_name)
 
-    logger.info("开始派单: 工单=%s, 供应商=%s(%s)", short_name, supplier_full_name)
+    logger.info(
+        "开始派单: 工单=%s, 供应商=%s(%s)",
+        order_id,
+        short_name,
+        supplier_full_name,
+    )
 
     # 1. Fetch PTS data via GraphQL
     logger.info("[1/3] 读取 PTS 工单信息...")
@@ -342,7 +350,13 @@ async def create_yunji_requirement(
 
     # Find supplier partner ID
     partner = _find_partner(partners, supplier_full_name)
-    logger.info("供应商: %s (ID: %s)", partner["label"], partner["value"])
+    partner_label = str(partner.get("label") or "").strip()
+    partner_id = partner.get("value")
+    if not partner_label or partner_id in (None, ""):
+        raise RuntimeError(
+            f"供应商匹配结果无效: 名称={partner_label or '(空)'}, ID={partner_id}，已阻止创建云集需求"
+        )
+    logger.info("供应商: %s (ID: %s)", partner_label, partner_id)
 
     # Find commissioner
     commissioner = _find_by_nickname(commissioners, DEFAULTS["outsource_specialist"])
@@ -384,7 +398,7 @@ async def create_yunji_requirement(
     }
     if crm_product:
         item_data["crmProduct"] = crm_product
-    item_data["assignPartnerId"] = partner["value"]
+    item_data["assignPartnerId"] = partner_id
     item_data["assignScene"] = DEFAULTS["designated_scenario"]
     item_data["outsourcingMode"] = DEFAULTS["outsource_method"]
     item_data["serviceBeginTime"] = today_ts
@@ -453,7 +467,7 @@ async def create_yunji_requirement(
         "commissionerName": result.get("commissionerName", ""),
         "regionalManagerName": result.get("regionalManagerName", ""),
         "totalBudget": result.get("totalBudget", 0),
-        "supplierName": f"{short_name} ({partner.get('label', supplier_full_name)})",
+        "supplierName": f"{short_name} ({partner_label})",
         "crmId": crm_project_id,
     }
 
@@ -466,19 +480,33 @@ def _find_partner(partners: list, supplier_full_name: str) -> dict:
     if not isinstance(partners, list):
         raise RuntimeError(f"云集供应商列表返回格式异常: {type(partners).__name__}")
 
+    target = str(supplier_full_name or "").strip()
+    if not target:
+        raise RuntimeError("供应商名称为空，无法匹配云集供应商")
+
+    valid_partners = []
+    for partner in partners:
+        if not isinstance(partner, dict):
+            continue
+        label = str(partner.get("label") or "").strip()
+        value = partner.get("value")
+        if not label or value in (None, ""):
+            continue
+        valid_partners.append({**partner, "label": label})
+
     # Exact match
-    for p in partners:
-        label = p.get("label", "")
-        if label == supplier_full_name:
+    for p in valid_partners:
+        label = p["label"]
+        if label == target:
             return p
 
     # Fuzzy match
-    for p in partners:
-        label = p.get("label", "")
-        if supplier_full_name in label or label in supplier_full_name:
+    for p in valid_partners:
+        label = p["label"]
+        if target in label or label in target:
             return p
 
-    raise RuntimeError(f"未找到供应商: {supplier_full_name}，请检查供应商名称")
+    raise RuntimeError(f"未找到供应商: {target}，请检查供应商名称")
 
 
 def _find_by_nickname(users: list, nickname: str) -> dict | None:
