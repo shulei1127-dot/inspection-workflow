@@ -34,6 +34,17 @@ class ReportAuditRulesTests(unittest.TestCase):
         )
         self.assertNotIn("COMMON-006", {item["rule_id"] for item in findings})
 
+    def test_customer_legal_entity_name_must_match_in_full(self):
+        text = ("华福证券有限责任公司 万象巡检报告 设备巡检信息汇总 系统运行正常" * 100)
+        findings = run_hard_rules(
+            "华福证券股份有限公司",
+            "安全分析与运营管理平台（万象）",
+            "华福证券有限责任公司万象巡检报告-2026.09.15.pdf",
+            text,
+            11,
+        )
+        self.assertIn("COMMON-001", {item["rule_id"] for item in findings})
+
     def test_attachment_fingerprint_is_order_independent(self):
         attachments = [
             {"resourceId": "2", "filename": "b.docx", "size": 2, "url": "https://old"},

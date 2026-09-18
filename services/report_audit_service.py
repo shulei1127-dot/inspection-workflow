@@ -36,6 +36,7 @@ PRODUCT_ALIASES = {
     "洞鉴": ("洞鉴", "风险评估"),
     "谛听": ("谛听", "d-sensor", "dsensor", "伪装欺骗", "主动威胁欺骗"),
     "牧云": ("牧云", "cloudwalker", "云工作负载", "cwpp"),
+    "万象": ("万象", "安全分析与运营管理平台"),
     "墨攻": ("墨攻",),
     "全悉": ("全悉",),
 }
@@ -66,16 +67,6 @@ def _finding(
 
 def _normalize(value: str) -> str:
     return re.sub(r"[\s\-—_·•（）()【】\[\]，,。.:：;；/\\]", "", value or "").lower()
-
-
-def _customer_variants(customer: str) -> list[str]:
-    normalized = _normalize(customer)
-    variants = {normalized}
-    short = re.sub(r"(有限责任公司|股份有限公司|有限公司|集团公司|集团)$", "", normalized)
-    short = re.sub(r"^中国", "", short)
-    if len(short) >= 4:
-        variants.add(short)
-    return sorted((value for value in variants if len(value) >= 4), key=len, reverse=True)
 
 
 def _product_family(value: str) -> str | None:
@@ -130,9 +121,9 @@ def run_hard_rules(customer: str, product: str, filename: str, text: str, page_c
     findings: list[dict] = []
     normalized_text = _normalize(text)
     normalized_filename = _normalize(filename)
-    variants = _customer_variants(customer)
+    normalized_customer = _normalize(customer)
 
-    if variants and not any(value in normalized_text for value in variants):
+    if len(normalized_customer) >= 4 and normalized_customer not in normalized_text:
         findings.append(
             _finding(
                 "COMMON-001",
@@ -142,7 +133,7 @@ def run_hard_rules(customer: str, product: str, filename: str, text: str, page_c
                 "核对附件是否上传到了正确客户记录，并统一封面、页眉和正文客户名称。",
             )
         )
-    elif variants and not any(value in normalized_filename for value in variants):
+    elif len(normalized_customer) >= 4 and normalized_customer not in normalized_filename:
         findings.append(
             _finding(
                 "COMMON-002",
