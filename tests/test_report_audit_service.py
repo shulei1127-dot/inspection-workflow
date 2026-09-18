@@ -3,6 +3,7 @@ import unittest
 from services.report_audit_service import (
     attachment_fingerprint,
     deduplicate_ai_findings,
+    group_report_attachments,
     is_unsent_report_record,
     parse_ai_findings,
     run_attachment_rules,
@@ -11,6 +12,35 @@ from services.report_audit_service import (
 
 
 class ReportAuditRulesTests(unittest.TestCase):
+    def test_groups_pdf_docx_pairs_but_keeps_different_reports_separate(self):
+        attachments = [
+            {"filename": "客户雷池巡检报告-10.0.0.2.docx"},
+            {"filename": "客户雷池巡检报告-10.0.0.1.pdf"},
+            {"filename": "客户雷池巡检报告-10.0.0.2.pdf"},
+            {"filename": "说明.txt"},
+            {"filename": "客户雷池巡检报告-10.0.0.1.docx"},
+        ]
+        groups = group_report_attachments(attachments)
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(
+            [[item["filename"] for item in group] for group in groups],
+            [
+                ["客户雷池巡检报告-10.0.0.1.pdf", "客户雷池巡检报告-10.0.0.1.docx"],
+                ["客户雷池巡检报告-10.0.0.2.docx", "客户雷池巡检报告-10.0.0.2.pdf"],
+            ],
+        )
+
+    def test_multi_product_dispatch_accepts_each_expected_product_family(self):
+        text = ("安徽省气象局 谛听巡检报告 设备巡检信息汇总 系统运行正常" * 100)
+        findings = run_hard_rules(
+            "安徽省气象局",
+            "风险评估系统（洞鉴）、主动威胁欺骗防御系统（谛听）",
+            "安徽省气象局谛听巡检报告.pdf",
+            text,
+            10,
+        )
+        self.assertNotIn("COMMON-003", {item["rule_id"] for item in findings})
+
     def test_only_explicit_unsent_records_with_report_are_candidates(self):
         base_record = {
             "recordId": "rec-1",

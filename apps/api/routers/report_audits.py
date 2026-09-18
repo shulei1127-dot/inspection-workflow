@@ -91,6 +91,11 @@ async def recheck_report_audit(audit_id: str, db: Session = Depends(get_db)):
     row = db.query(ReportAudit).filter(ReportAudit.id == audit_uuid).first()
     if not row:
         raise HTTPException(status_code=404, detail="audit not found")
-    result = await report_audit_service.scan_reports(db, limit=1, force_record_id=row.aitable_record_id)
+    result = await report_audit_service.scan_reports(
+        db,
+        limit=1,
+        force_record_id=row.aitable_record_id,
+        force_attachment_fingerprint=row.attachment_fingerprint,
+    )
     refreshed = db.query(ReportAudit).filter(ReportAudit.id == audit_uuid).first()
     return {"result": result, "audit": _serialize(refreshed or row)}

@@ -170,7 +170,7 @@ async function handleScan() {
   scanning.value = true
   try {
     const result = await scanReportAudits(100)
-    ElMessage.success(`扫描完成：符合条件 ${result.eligible} 条，审核 ${result.reviewed} 条，跳过 ${result.skipped} 条`)
+    ElMessage.success(`扫描完成：${result.eligible_records} 条记录共 ${result.eligible} 份报告，审核 ${result.reviewed} 份，跳过 ${result.skipped} 份`)
     await loadData()
   } catch (error: any) {
     ElMessage.error('扫描失败：' + error.message)

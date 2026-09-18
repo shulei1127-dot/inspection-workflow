@@ -77,6 +77,15 @@ def _product_family(value: str) -> str | None:
     return None
 
 
+def _product_families(value: str) -> set[str]:
+    normalized = _normalize(value)
+    return {
+        family
+        for family, aliases in PRODUCT_ALIASES.items()
+        if any(_normalize(alias) in normalized for alias in aliases)
+    }
+
+
 def attachment_fingerprint(attachments: list[dict]) -> str:
     """Build a stable fingerprint without expiring signed URLs."""
     safe = []
@@ -144,19 +153,19 @@ def run_hard_rules(customer: str, product: str, filename: str, text: str, page_c
             )
         )
 
-    expected_family = _product_family(product)
-    actual_family = _product_family(filename + "\n" + text[:8000])
-    if expected_family and actual_family and expected_family != actual_family:
+    expected_families = _product_families(product)
+    actual_family = _product_family(filename) or _product_family(text[:8000])
+    if expected_families and actual_family and actual_family not in expected_families:
         findings.append(
             _finding(
                 "COMMON-003",
                 "blocker",
                 "报告产品与派单产品不一致",
-                f"派单产品识别为“{expected_family}”，报告识别为“{actual_family}”。",
+                f"派单产品识别为“{'、'.join(sorted(expected_families))}”，报告识别为“{actual_family}”。",
                 "检查是否误传了其他产品的报告，并重新上传正确附件。",
             )
         )
-    elif expected_family and not actual_family:
+    elif expected_families and not actual_family:
         findings.append(
             _finding(
                 "COMMON-004",
@@ -186,7 +195,8 @@ def run_hard_rules(customer: str, product: str, filename: str, text: str, page_c
             )
         )
 
-    if expected_family != "牧云" and "设备巡检信息汇总" not in re.sub(r"\s+", "", text):
+    report_family = actual_family or (next(iter(expected_families)) if len(expected_families) == 1 else None)
+    if report_family != "牧云" and "设备巡检信息汇总" not in re.sub(r"\s+", "", text):
         findings.append(
             _finding(
                 "COMMON-006",
@@ -495,6 +505,20 @@ def _choose_attachment(attachments: list[dict]) -> dict | None:
     return candidates[0] if candidates else None
 
 
+def group_report_attachments(attachments: list[dict]) -> list[list[dict]]:
+    """Pair same-named PDF/DOCX files and keep different reports separate."""
+    groups: dict[str, list[dict]] = {}
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            continue
+        filename = str(attachment.get("filename") or attachment.get("name") or "").strip()
+        if not filename.lower().endswith(SUPPORTED_EXTENSIONS):
+            continue
+        report_key = re.sub(r"\.(?:pdf|docx)$", "", filename, flags=re.IGNORECASE).strip().casefold()
+        groups.setdefault(report_key, []).append(attachment)
+    return [groups[key] for key in sorted(groups)]
+
+
 def is_unsent_report_record(record: dict) -> bool:
     """Only reports explicitly marked 邮件是否发送=否 are audit candidates."""
     if not isinstance(record, dict):
@@ -506,7 +530,7 @@ def is_unsent_report_record(record: dict) -> bool:
         record_id
         and extract_select_name(cells.get(DISPATCH["邮件是否发送"])) == "否"
         and isinstance(attachments, list)
-        and attachments
+        and group_report_attachments(attachments)
     )
 
 
@@ -590,7 +614,13 @@ async def review_audit(db: Session, row: ReportAudit, attachment: dict, attachme
         db.commit()
 
 
-async def scan_reports(db: Session, *, limit: int | None = None, force_record_id: str | None = None) -> dict:
+async def scan_reports(
+    db: Session,
+    *,
+    limit: int | None = None,
+    force_record_id: str | None = None,
+    force_attachment_fingerprint: str | None = None,
+) -> dict:
     """Audit reports explicitly marked unsent without any external write-back."""
     async with _SCAN_LOCK:
         settings = get_settings()
@@ -603,21 +633,31 @@ async def scan_reports(db: Session, *, limit: int | None = None, force_record_id
             strict=True,
         )
         if force_record_id:
-            candidates = [
+            candidate_records = [
                 record
                 for record in records
                 if (record.get("recordId") or record.get("record_id") or "") == force_record_id
             ]
         else:
-            candidates = [record for record in records if is_unsent_report_record(record)]
+            candidate_records = [record for record in records if is_unsent_report_record(record)]
+        candidates: list[tuple[dict, list[dict]]] = []
+        for record in candidate_records:
+            cells = record.get("cells") or {}
+            attachments = cells.get(DISPATCH["巡检报告"])
+            if not isinstance(attachments, list):
+                continue
+            for report_attachments in group_report_attachments(attachments):
+                fingerprint = attachment_fingerprint(report_attachments)
+                if force_attachment_fingerprint and fingerprint != force_attachment_fingerprint:
+                    continue
+                candidates.append((record, report_attachments))
         scanned = created = reviewed = skipped = failed = 0
-        for record in candidates:
+        for record, attachments in candidates:
             if reviewed >= max_items:
                 break
             record_id = record.get("recordId") or record.get("record_id") or ""
             cells = record.get("cells") or {}
-            attachments = cells.get(DISPATCH["巡检报告"])
-            if not record_id or not isinstance(attachments, list) or not attachments:
+            if not record_id or not attachments:
                 continue
             scanned += 1
             attachment = _choose_attachment(attachments)
@@ -634,10 +674,36 @@ async def scan_reports(db: Session, *, limit: int | None = None, force_record_id
                 )
                 .first()
             )
+            if not row:
+                current_fingerprints = {
+                    attachment_fingerprint(group)
+                    for group in group_report_attachments(cells.get(DISPATCH["巡检报告"]) or [])
+                }
+                # Reuse the pre-grouping row once so existing per-record results
+                # become per-report results without leaving duplicate legacy rows.
+                row = next(
+                    (
+                        existing
+                        for existing in db.query(ReportAudit)
+                        .filter(
+                            ReportAudit.aitable_record_id == record_id,
+                            ReportAudit.rule_version == RULE_VERSION,
+                        )
+                        .all()
+                        if existing.attachment_fingerprint not in current_fingerprints
+                    ),
+                    None,
+                )
             if row and not force_record_id and row.status not in {"pending", "running", "failed"}:
                 skipped += 1
                 continue
             if row:
+                row.pts_order_id = extract_pts_order_id_from_link(cells.get(DISPATCH["巡检工单链接"]))
+                row.customer_name = extract_text(cells.get(DISPATCH["客户名称"]))
+                row.product_name = extract_text(cells.get(DISPATCH["产品名称"]))
+                row.filename = str(attachment.get("filename") or "report")
+                row.attachment_fingerprint = fingerprint
+                row.attachments = _safe_attachments(attachments)
                 row.status = "pending"
                 row.score = None
                 row.blocker_count = 0
@@ -669,6 +735,7 @@ async def scan_reports(db: Session, *, limit: int | None = None, force_record_id
                 failed += 1
         return {
             "eligible": len(candidates),
+            "eligible_records": len(candidate_records),
             "scanned": scanned,
             "created": created,
             "reviewed": reviewed,
