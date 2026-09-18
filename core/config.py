@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     report_audit_scan_limit: int = 3
     report_audit_ai_enabled: bool = True
     report_audit_ai_model: str = "glm-4-flash"
+    report_audit_ai_timeout_seconds: float = 45.0
     report_audit_max_file_mb: int = 30
 
     # Email pre-analysis

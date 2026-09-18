@@ -250,9 +250,9 @@ def run_hard_rules(customer: str, product: str, filename: str, text: str, page_c
 
 
 def _extract_pdf(content: bytes) -> tuple[str, dict]:
-    import fitz
+    import pymupdf
 
-    document = fitz.open(stream=content, filetype="pdf")
+    document = pymupdf.open(stream=content, filetype="pdf")
     pages = []
     for index, page in enumerate(document):
         pages.append(f"\n[第{index + 1}页]\n{page.get_text()}")
@@ -336,7 +336,11 @@ def _run_llm_review(customer: str, product: str, filename: str, text: str) -> tu
 报告文字：
 {text[:60000]}
 """
-    client = ZhipuAI(api_key=settings.ai_api_key)
+    client = ZhipuAI(
+        api_key=settings.ai_api_key,
+        timeout=max(5.0, settings.report_audit_ai_timeout_seconds),
+        max_retries=0,
+    )
     response = client.chat.completions.create(
         model=settings.report_audit_ai_model,
         messages=[{"role": "user", "content": prompt}],
@@ -445,20 +449,25 @@ async def review_audit(db: Session, row: ReportAudit, attachment: dict, attachme
             run_hard_rules(row.customer_name or "", row.product_name or "", filename, text, meta.get("page_count"))
         )
         try:
-            ai_findings, summary = await asyncio.to_thread(
-                _run_llm_review,
-                row.customer_name or "",
-                row.product_name or "",
-                filename,
-                text,
+            settings = get_settings()
+            ai_findings, summary = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _run_llm_review,
+                    row.customer_name or "",
+                    row.product_name or "",
+                    filename,
+                    text,
+                ),
+                timeout=max(10.0, settings.report_audit_ai_timeout_seconds + 5.0),
             )
-            row.ai_used = bool(get_settings().report_audit_ai_enabled and get_settings().ai_api_key)
+            row.ai_used = bool(settings.report_audit_ai_enabled and settings.ai_api_key)
             row.llm_summary = summary
             findings.extend(ai_findings)
         except Exception as exc:
             logger.warning("Report audit AI failed for %s: %s", row.aitable_record_id, exc)
             row.ai_used = False
-            row.llm_summary = f"大模型审核失败，仅保留硬规则结果：{str(exc)[:300]}"
+            detail = "调用超时" if isinstance(exc, TimeoutError) else (str(exc)[:300] or exc.__class__.__name__)
+            row.llm_summary = f"大模型审核失败，仅保留硬规则结果：{detail}"
         _finalize(row, findings)
         db.commit()
     except Exception as exc:
@@ -511,12 +520,19 @@ async def scan_reports(db: Session, *, limit: int | None = None, force_record_id
                 )
                 .first()
             )
-            if row and not force_record_id:
+            if row and not force_record_id and row.status not in {"pending", "running", "failed"}:
                 skipped += 1
                 continue
             if row:
                 row.status = "pending"
+                row.score = None
+                row.blocker_count = 0
+                row.error_count = 0
+                row.warning_count = 0
                 row.findings = None
+                row.document_meta = None
+                row.llm_summary = None
+                row.ai_used = False
                 row.error_message = None
             else:
                 row = ReportAudit(
