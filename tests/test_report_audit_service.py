@@ -1,6 +1,12 @@
 import unittest
 
-from services.report_audit_service import attachment_fingerprint, run_attachment_rules, run_hard_rules
+from services.report_audit_service import (
+    attachment_fingerprint,
+    deduplicate_ai_findings,
+    parse_ai_findings,
+    run_attachment_rules,
+    run_hard_rules,
+)
 
 
 class ReportAuditRulesTests(unittest.TestCase):
@@ -63,6 +69,48 @@ class ReportAuditRulesTests(unittest.TestCase):
             [{"filename": "客户雷池巡检报告.pdf"}, {"filename": "客户雷池巡检报告.docx"}]
         )
         self.assertEqual(findings, [])
+
+    def test_ai_findings_require_verbatim_evidence_and_ignore_equivalent_dates(self):
+        text = "报告日期：2026-09-15。巡检日期：2026年09月15日。共接入设备36台，本次巡检1台设备。"
+        data = {
+            "findings": [
+                {
+                    "rule_id": "AI-001",
+                    "severity": "error",
+                    "title": "日期前后矛盾",
+                    "evidence_quotes": ["报告日期：2026-09-15", "巡检日期：2026年09月15日"],
+                    "suggestion": "统一日期",
+                },
+                {
+                    "rule_id": "AI-002",
+                    "severity": "warning",
+                    "title": "设备数量口径需核对",
+                    "evidence_quotes": ["共接入设备36台", "本次巡检1台设备"],
+                    "suggestion": "说明接入数与本次巡检数的关系",
+                },
+                {
+                    "rule_id": "AI-003",
+                    "severity": "warning",
+                    "title": "模板混用",
+                    "evidence_quotes": ["原文中不存在的模板名称"],
+                    "suggestion": "更换模板",
+                },
+            ]
+        }
+        findings = parse_ai_findings(data, text)
+        self.assertEqual([item["rule_id"] for item in findings], ["AI-002"])
+
+    def test_ai_findings_are_deduplicated_against_hard_rules(self):
+        hard = [{"rule_id": "COMMON-001"}, {"rule_id": "COMMON-006"}]
+        ai = [
+            {"rule_id": "AI-001", "title": "客户名称不一致"},
+            {"rule_id": "AI-002", "title": "缺少设备巡检信息汇总"},
+            {"rule_id": "AI-003", "title": "设备数量口径需核对"},
+        ]
+        self.assertEqual(
+            [item["rule_id"] for item in deduplicate_ai_findings(hard, ai)],
+            ["AI-003"],
+        )
 
 
 if __name__ == "__main__":

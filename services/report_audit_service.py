@@ -287,6 +287,86 @@ def _clean_json_block(content: str) -> dict:
     return data
 
 
+def _evidence_key(value: str) -> str:
+    return re.sub(r"[^\w\u4e00-\u9fff]", "", value or "", flags=re.UNICODE).lower()
+
+
+def _extract_dates(values: list[str]) -> set[tuple[int, int, int]]:
+    dates: set[tuple[int, int, int]] = set()
+    for value in values:
+        for year, month, day in re.findall(
+            r"(?<!\d)(20\d{2})\s*[年./-]\s*(\d{1,2})\s*[月./-]\s*(\d{1,2})\s*日?",
+            value,
+        ):
+            dates.add((int(year), int(month), int(day)))
+    return dates
+
+
+def parse_ai_findings(data: dict, text: str) -> list[dict]:
+    """Accept only AI findings backed by verbatim, locatable report quotes."""
+    findings = []
+    text_key = _evidence_key(text)
+    raw_findings = data.get("findings") or []
+    if not isinstance(raw_findings, list):
+        return findings
+    for index, raw in enumerate(raw_findings[:8]):
+        if not isinstance(raw, dict):
+            continue
+        raw_quotes = raw.get("evidence_quotes") or []
+        if not isinstance(raw_quotes, list):
+            continue
+        quotes = []
+        for value in raw_quotes[:3]:
+            quote = str(value or "").strip()
+            quote_key = _evidence_key(quote)
+            if len(quote_key) >= 6 and quote_key in text_key:
+                quotes.append(quote[:200])
+        if not quotes:
+            continue
+        title = str(raw.get("title") or "语义审核问题")
+        # Different display formats of the same calendar date are equivalent.
+        if any(keyword in title for keyword in ("日期", "时间")):
+            dates = _extract_dates(quotes)
+            if dates and len(dates) < 2:
+                continue
+        severity = str(raw.get("severity") or "warning").lower()
+        if severity not in SEVERITY_WEIGHT:
+            severity = "warning"
+        findings.append(
+            _finding(
+                str(raw.get("rule_id") or f"AI-{index + 1:03d}"),
+                severity,
+                title,
+                "；".join(f"“{quote}”" for quote in quotes),
+                str(raw.get("suggestion") or "请人工复核"),
+                source="ai",
+                page=raw.get("page") if isinstance(raw.get("page"), int) else None,
+            )
+        )
+    return findings
+
+
+def deduplicate_ai_findings(hard_findings: list[dict], ai_findings: list[dict]) -> list[dict]:
+    hard_ids = {str(item.get("rule_id")) for item in hard_findings}
+    duplicate_keywords = {
+        "COMMON-001": ("客户", "主体"),
+        "COMMON-003": ("产品", "模板混用"),
+        "COMMON-005": ("目录",),
+        "COMMON-006": ("设备巡检信息汇总", "信息汇总"),
+        "COMMON-007": ("占位", "模板残留"),
+    }
+    kept = []
+    for finding in ai_findings:
+        title = str(finding.get("title") or "")
+        if any(
+            rule_id in hard_ids and any(keyword in title for keyword in keywords)
+            for rule_id, keywords in duplicate_keywords.items()
+        ):
+            continue
+        kept.append(finding)
+    return kept
+
+
 def _run_llm_review(customer: str, product: str, filename: str, text: str) -> tuple[list[dict], str]:
     settings = get_settings()
     if not settings.report_audit_ai_enabled or not settings.ai_api_key:
@@ -297,8 +377,8 @@ def _run_llm_review(customer: str, product: str, filename: str, text: str) -> tu
     prompt = f"""你是企业安全产品巡检报告审核员。
 派单客户：{customer}；派单产品：{product}；文件：{filename}。
 检查：客户和产品错配或模板混用；日期、版本、设备数、异常数、工程师前后矛盾；目录或章节缺失；结论与异常矛盾；异常没有可执行建议；模板占位或绝对化结论；非牧云缺少末尾“设备巡检信息汇总”。
-只依据原文直接证据，禁止猜测字体、图片清晰度或页眉图案。相同问题合并，最多 8 条，每条证据和建议不超过 120 字。
-返回严格 JSON，不要 Markdown：{{"summary":"一句话结论","findings":[{{"rule_id":"AI-001","severity":"blocker|error|warning|info","title":"问题","evidence":"原文证据","suggestion":"修改建议","page":1}}]}}。
+只依据原文直接证据，禁止猜测字体、图片清晰度或页眉图案。相同问题合并，最多 8 条。evidence_quotes 必须是从报告逐字复制的 1-3 个原文片段，每段 8-120 字，不得解释或改写；无法逐字引用就不要报告。
+返回严格 JSON，不要 Markdown：{{"summary":"一句话结论","findings":[{{"rule_id":"AI-001","severity":"blocker|error|warning|info","title":"问题","evidence_quotes":["原文片段1","原文片段2"],"suggestion":"修改建议","page":1}}]}}。
 报告文字：{text[:60000]}
 """
     client = ZhipuAI(
@@ -313,24 +393,7 @@ def _run_llm_review(customer: str, product: str, filename: str, text: str) -> tu
         max_tokens=1200,
     )
     data = _clean_json_block(response.choices[0].message.content)
-    findings = []
-    for index, raw in enumerate((data.get("findings") or [])[:8]):
-        if not isinstance(raw, dict):
-            continue
-        severity = str(raw.get("severity") or "warning").lower()
-        if severity not in SEVERITY_WEIGHT:
-            severity = "warning"
-        findings.append(
-            _finding(
-                str(raw.get("rule_id") or f"AI-{index + 1:03d}"),
-                severity,
-                str(raw.get("title") or "语义审核问题"),
-                str(raw.get("evidence") or "模型未给出证据"),
-                str(raw.get("suggestion") or "请人工复核"),
-                source="ai",
-                page=raw.get("page") if isinstance(raw.get("page"), int) else None,
-            )
-        )
+    findings = parse_ai_findings(data, text)
     return findings, str(data.get("summary") or "大模型审核完成")[:2000]
 
 
@@ -428,7 +491,7 @@ async def review_audit(db: Session, row: ReportAudit, attachment: dict, attachme
             )
             row.ai_used = bool(settings.report_audit_ai_enabled and settings.ai_api_key)
             row.llm_summary = summary
-            findings.extend(ai_findings)
+            findings.extend(deduplicate_ai_findings(findings, ai_findings))
         except Exception as exc:
             logger.warning("Report audit AI failed for %s: %s", row.aitable_record_id, exc)
             row.ai_used = False
