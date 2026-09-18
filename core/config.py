@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     # Inspection report audit (isolated and read-only toward DingTalk/PTS)
     report_audit_enabled: bool = False
     report_audit_cron: str = "7,37 8-20 * * *"
-    report_audit_scan_limit: int = 3
+    report_audit_scan_limit: int = 100
     report_audit_ai_enabled: bool = True
     report_audit_ai_model: str = "glm-4-flash"
     report_audit_ai_timeout_seconds: float = 45.0

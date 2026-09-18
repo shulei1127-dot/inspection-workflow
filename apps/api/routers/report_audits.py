@@ -76,7 +76,7 @@ async def list_report_audits(
 
 @router.post("/api/report-audits/scan")
 async def scan_report_audits(
-    limit: int = Query(3, ge=1, le=20),
+    limit: int = Query(100, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
     return await report_audit_service.scan_reports(db, limit=limit)

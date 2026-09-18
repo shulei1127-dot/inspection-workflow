@@ -3,6 +3,7 @@ import unittest
 from services.report_audit_service import (
     attachment_fingerprint,
     deduplicate_ai_findings,
+    is_unsent_report_record,
     parse_ai_findings,
     run_attachment_rules,
     run_hard_rules,
@@ -10,6 +11,23 @@ from services.report_audit_service import (
 
 
 class ReportAuditRulesTests(unittest.TestCase):
+    def test_only_explicit_unsent_records_with_report_are_candidates(self):
+        base_record = {
+            "recordId": "rec-1",
+            "cells": {
+                "ZzlBIoW": {"name": "否"},
+                "nd284rT": [{"filename": "客户雷池巡检报告.pdf"}],
+            },
+        }
+        self.assertTrue(is_unsent_report_record(base_record))
+
+        sent_record = {**base_record, "cells": {**base_record["cells"], "ZzlBIoW": {"name": "是"}}}
+        empty_status = {**base_record, "cells": {**base_record["cells"], "ZzlBIoW": None}}
+        no_report = {**base_record, "cells": {**base_record["cells"], "nd284rT": []}}
+        self.assertFalse(is_unsent_report_record(sent_record))
+        self.assertFalse(is_unsent_report_record(empty_status))
+        self.assertFalse(is_unsent_report_record(no_report))
+
     def test_detects_wrong_customer_product_toc_and_missing_summary(self):
         text = """中远海运集装箱运输有限公司
         谛听巡检报告

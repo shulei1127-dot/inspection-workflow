@@ -9,6 +9,7 @@
 | **同步** | 从 PTS 拉取巡检工单 → 存入 PostgreSQL → 推送至钉钉 AITable |
 | **派单** | 监控 AITable 记录，满足条件时自动触发云集外包平台派单 |
 | **邮件** | 检测 AITable 巡检报告附件，AI 提取信息后自动发送邮件给客户 |
+| **报告审核** | 只读审核“邮件是否发送=否”的巡检报告，展示硬规则与 AI 证据 |
 | **闭环** | 巡检完成后自动在 PTS 中推进阶段、闭环工单 |
 
 ## 技术栈
@@ -117,6 +118,8 @@ POST /api/monitor/dispatch/{id}    # 手动派单
 GET  /api/monitor/email-pending    # 查看待发邮件记录
 POST /api/monitor/send-email/{id}  # 手动发送邮件
 POST /api/monitor/closure-check    # 触发闭环检查
+POST /api/report-audits/scan       # 审核全部待发巡检报告
+GET  /api/report-audits            # 查看报告审核结果
 GET  /api/work-orders              # 工单列表
 GET  /api/statistics/overview      # 统计概览
 WS   /api/ws                       # 实时事件推送

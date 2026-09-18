@@ -495,6 +495,21 @@ def _choose_attachment(attachments: list[dict]) -> dict | None:
     return candidates[0] if candidates else None
 
 
+def is_unsent_report_record(record: dict) -> bool:
+    """Only reports explicitly marked 邮件是否发送=否 are audit candidates."""
+    if not isinstance(record, dict):
+        return False
+    record_id = record.get("recordId") or record.get("record_id") or ""
+    cells = record.get("cells") or {}
+    attachments = cells.get(DISPATCH["巡检报告"])
+    return bool(
+        record_id
+        and extract_select_name(cells.get(DISPATCH["邮件是否发送"])) == "否"
+        and isinstance(attachments, list)
+        and attachments
+    )
+
+
 async def _download_attachment(attachment: dict) -> bytes:
     settings = get_settings()
     url = attachment.get("url") or attachment.get("downloadUrl") or attachment.get("resourceUrl") or ""
@@ -576,10 +591,10 @@ async def review_audit(db: Session, row: ReportAudit, attachment: dict, attachme
 
 
 async def scan_reports(db: Session, *, limit: int | None = None, force_record_id: str | None = None) -> dict:
-    """Audit new unsent report versions without any external write-back."""
+    """Audit reports explicitly marked unsent without any external write-back."""
     async with _SCAN_LOCK:
         settings = get_settings()
-        max_items = max(1, min(limit or settings.report_audit_scan_limit, 20))
+        max_items = max(1, min(limit or settings.report_audit_scan_limit, 200))
         records = await dingtalk_client.query_records(
             limit=100,
             base_id=settings.dt_dispatch_base_id,
@@ -587,20 +602,22 @@ async def scan_reports(db: Session, *, limit: int | None = None, force_record_id
             fetch_all=True,
             strict=True,
         )
+        if force_record_id:
+            candidates = [
+                record
+                for record in records
+                if (record.get("recordId") or record.get("record_id") or "") == force_record_id
+            ]
+        else:
+            candidates = [record for record in records if is_unsent_report_record(record)]
         scanned = created = reviewed = skipped = failed = 0
-        for record in records:
+        for record in candidates:
             if reviewed >= max_items:
                 break
             record_id = record.get("recordId") or record.get("record_id") or ""
-            if force_record_id and record_id != force_record_id:
-                continue
             cells = record.get("cells") or {}
             attachments = cells.get(DISPATCH["巡检报告"])
             if not record_id or not isinstance(attachments, list) or not attachments:
-                continue
-            # New reports are audited before outbound mail. A forced recheck is
-            # allowed after mail was sent so an existing result remains usable.
-            if not force_record_id and extract_select_name(cells.get(DISPATCH["邮件是否发送"])) == "是":
                 continue
             scanned += 1
             attachment = _choose_attachment(attachments)
@@ -651,6 +668,7 @@ async def scan_reports(db: Session, *, limit: int | None = None, force_record_id
             if row.status == "failed":
                 failed += 1
         return {
+            "eligible": len(candidates),
             "scanned": scanned,
             "created": created,
             "reviewed": reviewed,

@@ -6,13 +6,13 @@
         <p class="subtitle">独立只读模块：不会修改钉钉、发送邮件或推进 PTS 工单</p>
       </div>
       <el-button type="primary" :loading="scanning" @click="handleScan">
-        {{ scanning ? '审核中...' : '扫描新增报告' }}
+        {{ scanning ? '审核中...' : '审核全部待发报告' }}
       </el-button>
     </div>
 
     <el-alert
       title="当前为准确性观察阶段"
-      description="周期扫描默认关闭；点击按钮只审核最多 3 份尚未发送邮件的新报告。审核结果不参与现有业务判断。"
+      description="周期扫描默认关闭；点击按钮将审核“邮件是否发送=否”且已上传巡检报告的全部记录。审核结果不参与现有业务判断。"
       type="info"
       :closable="false"
       show-icon
@@ -169,8 +169,8 @@ async function loadData() {
 async function handleScan() {
   scanning.value = true
   try {
-    const result = await scanReportAudits(3)
-    ElMessage.success(`扫描完成：审核 ${result.reviewed} 条，跳过 ${result.skipped} 条`)
+    const result = await scanReportAudits(100)
+    ElMessage.success(`扫描完成：符合条件 ${result.eligible} 条，审核 ${result.reviewed} 条，跳过 ${result.skipped} 条`)
     await loadData()
   } catch (error: any) {
     ElMessage.error('扫描失败：' + error.message)

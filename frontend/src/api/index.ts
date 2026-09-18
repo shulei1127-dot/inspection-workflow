@@ -118,7 +118,7 @@ export const getReportAudits = (params: Record<string, any> = {}) => {
 
 export const getReportAuditStats = () => fetchJson('/api/report-audits/stats')
 
-export const scanReportAudits = (limit = 3) =>
+export const scanReportAudits = (limit = 100) =>
   postJson(`/api/report-audits/scan?limit=${limit}`)
 
 export const recheckReportAudit = (auditId: string) =>
