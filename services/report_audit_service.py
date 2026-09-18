@@ -674,6 +674,7 @@ async def scan_reports(
                 )
                 .first()
             )
+            legacy_reuse = False
             if not row:
                 current_fingerprints = {
                     attachment_fingerprint(group)
@@ -694,7 +695,13 @@ async def scan_reports(
                     ),
                     None,
                 )
-            if row and not force_record_id and row.status not in {"pending", "running", "failed"}:
+                legacy_reuse = row is not None
+            if (
+                row
+                and not legacy_reuse
+                and not force_record_id
+                and row.status not in {"pending", "running", "failed"}
+            ):
                 skipped += 1
                 continue
             if row:
