@@ -294,38 +294,12 @@ def _run_llm_review(customer: str, product: str, filename: str, text: str) -> tu
 
     from zhipuai import ZhipuAI
 
-    prompt = f"""你是企业安全产品巡检报告审核员。请只依据下方已提取的报告文字审核，禁止猜测字体、图片清晰度、页眉图案等无法由文字证明的事项。
-
-派单客户：{customer}
-派单产品：{product}
-审核文件：{filename}
-
-审核清单：
-1. 客户全称与派单、封面、正文一致，不得残留其他客户名称。
-2. 产品名称与派单一致；雷池、洞鉴、谛听、牧云等模板不得混用。
-3. 标题、目录、章节结构完整；目录标题、层级和正文一致，不得有目录报错占位文字。
-4. 巡检日期、时间、版本、设备数量、异常数量、工程师在全文前后一致，不得保留旧日期或模板占位符。
-5. 检查结果使用“正常/异常/未涉及”；结论必须与告警、异常和建议一致，异常必须给出可执行建议。
-6. 非牧云报告最后一个业务章节必须是“设备巡检信息汇总”，并包含设备类型、巡检日期、运行状态、巡检时间、事件记录、服务商和工程师；牧云除外。
-7. 不得出现“绝对安全”等无证据的绝对化结论。
-
-只报告有直接原文证据的问题。证据不足时不要报错。相同问题合并为一条。返回严格 JSON，不要 Markdown：
-{{
-  "summary": "一句话审核结论",
-  "findings": [
-    {{
-      "rule_id": "AI-001",
-      "severity": "blocker|error|warning|info",
-      "title": "问题标题",
-      "evidence": "原文证据，尽量包含[第N页]标记附近的原文",
-      "suggestion": "具体修改建议",
-      "page": 1
-    }}
-  ]
-}}
-
-报告文字：
-{text[:60000]}
+    prompt = f"""你是企业安全产品巡检报告审核员。
+派单客户：{customer}；派单产品：{product}；文件：{filename}。
+检查：客户和产品错配或模板混用；日期、版本、设备数、异常数、工程师前后矛盾；目录或章节缺失；结论与异常矛盾；异常没有可执行建议；模板占位或绝对化结论；非牧云缺少末尾“设备巡检信息汇总”。
+只依据原文直接证据，禁止猜测字体、图片清晰度或页眉图案。相同问题合并，最多 8 条，每条证据和建议不超过 120 字。
+返回严格 JSON，不要 Markdown：{{"summary":"一句话结论","findings":[{{"rule_id":"AI-001","severity":"blocker|error|warning|info","title":"问题","evidence":"原文证据","suggestion":"修改建议","page":1}}]}}。
+报告文字：{text[:60000]}
 """
     client = ZhipuAI(
         api_key=settings.ai_api_key,
@@ -336,11 +310,11 @@ def _run_llm_review(customer: str, product: str, filename: str, text: str) -> tu
         model=settings.report_audit_ai_model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
-        max_tokens=2048,
+        max_tokens=1200,
     )
     data = _clean_json_block(response.choices[0].message.content)
     findings = []
-    for index, raw in enumerate(data.get("findings") or []):
+    for index, raw in enumerate((data.get("findings") or [])[:8]):
         if not isinstance(raw, dict):
             continue
         severity = str(raw.get("severity") or "warning").lower()
