@@ -336,6 +336,7 @@ def _run_llm_review(customer: str, product: str, filename: str, text: str) -> tu
         model=settings.report_audit_ai_model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
+        max_tokens=2048,
     )
     data = _clean_json_block(response.choices[0].message.content)
     findings = []
