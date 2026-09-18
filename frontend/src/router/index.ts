@@ -29,6 +29,11 @@ const router = createRouter({
       component: () => import('../views/InspectionLibrary.vue'),
     },
     {
+      path: '/report-audits',
+      name: 'ReportAudit',
+      component: () => import('../views/ReportAudit.vue'),
+    },
+    {
       path: '/email-tool',
       name: 'EmailTool',
       component: () => import('../views/EmailTool.vue'),

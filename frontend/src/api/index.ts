@@ -107,6 +107,23 @@ export const syncInspectionLibrary = () =>
 export const backfillInspectionLibrary = (dryRun = false) =>
   postJson(`/api/inspection-library/backfill?dry_run=${dryRun}`)
 
+// ── Inspection Report Audit (isolated/read-only) ──
+export const getReportAudits = (params: Record<string, any> = {}) => {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') qs.set(k, String(v))
+  }
+  return fetchJson('/api/report-audits?' + qs.toString())
+}
+
+export const getReportAuditStats = () => fetchJson('/api/report-audits/stats')
+
+export const scanReportAudits = (limit = 3) =>
+  postJson(`/api/report-audits/scan?limit=${limit}`)
+
+export const recheckReportAudit = (auditId: string) =>
+  postJson(`/api/report-audits/${encodeURIComponent(auditId)}/recheck`)
+
 export const getPreAnalysisStatus = () =>
   fetchJson('/api/email-tool/pre-analysis')
 

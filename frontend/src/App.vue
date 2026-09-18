@@ -23,6 +23,10 @@
           <span class="nav-icon">🗂️</span>
           <span>巡检信息库</span>
         </router-link>
+        <router-link to="/report-audits" class="nav-item" active-class="active">
+          <span class="nav-icon">🧾</span>
+          <span>报告审核</span>
+        </router-link>
         <router-link to="/email-tool" class="nav-item" active-class="active">
           <span class="nav-icon">📧</span>
           <span>邮件发送</span>

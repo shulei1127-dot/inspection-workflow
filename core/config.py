@@ -70,6 +70,14 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = True
     scheduler_timezone: str = "Asia/Shanghai"
 
+    # Inspection report audit (isolated and read-only toward DingTalk/PTS)
+    report_audit_enabled: bool = False
+    report_audit_cron: str = "7,37 8-20 * * *"
+    report_audit_scan_limit: int = 3
+    report_audit_ai_enabled: bool = True
+    report_audit_ai_model: str = "glm-4-flash"
+    report_audit_max_file_mb: int = 30
+
     # Email pre-analysis
     email_pre_analysis_enabled: bool = True  # 启用邮件预分析定时任务
     email_pre_analysis_cron: str = "0 9 * * *"  # 每天9点运行一次预分析

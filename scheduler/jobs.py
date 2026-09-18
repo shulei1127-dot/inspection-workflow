@@ -144,6 +144,25 @@ def register_jobs(scheduler: BackgroundScheduler) -> list[str]:
             registered_ids.append("inspection-library:sync-backfill")
             logger.info("Registered inspection library job with cron: %s", library_cron)
 
+    # Inspection report audit (read-only and independently disabled by default)
+    if settings.report_audit_enabled and settings.dt_dispatch_base_id and settings.dt_dispatch_table_id:
+        report_audit_cron = settings.report_audit_cron.strip()
+        if report_audit_cron:
+            scheduler.add_job(
+                _run_report_audit_job,
+                trigger=CronTrigger.from_crontab(report_audit_cron, timezone=tz),
+                id="report-audit:scan",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
+            registered_ids.append("report-audit:scan")
+            logger.info(
+                "Registered report audit job with cron: %s (limit=%d)",
+                report_audit_cron,
+                settings.report_audit_scan_limit,
+            )
+
     # Sales confirm job (巡检确认表单推送)
     if settings.sales_confirm_enabled:
         sales_confirm_cron = settings.sales_confirm_cron.strip()
@@ -638,6 +657,30 @@ def _run_inspection_library_job() -> None:
             )
     except Exception as e:
         logger.exception("Scheduled inspection library job failed: %s", e)
+
+
+def _run_report_audit_job() -> None:
+    """Scan and review a small batch of newly uploaded reports.
+
+    The service is read-only toward AITable and PTS. The independent feature
+    flag is disabled by default so the first release can be evaluated manually.
+    """
+    try:
+        from services.report_audit_service import scan_reports
+
+        settings = get_settings()
+        with SessionLocal() as db:
+            result = asyncio.run(scan_reports(db, limit=settings.report_audit_scan_limit))
+        logger.info(
+            "Scheduled report audit completed: scanned=%d created=%d reviewed=%d skipped=%d failed=%d",
+            result.get("scanned", 0),
+            result.get("created", 0),
+            result.get("reviewed", 0),
+            result.get("skipped", 0),
+            result.get("failed", 0),
+        )
+    except Exception as e:
+        logger.exception("Scheduled report audit job failed: %s", e)
 
 
 def _run_agent_hub_job() -> None:
