@@ -302,6 +302,45 @@ def _extract_dates(values: list[str]) -> set[tuple[int, int, int]]:
     return dates
 
 
+def _has_explicit_conclusion_conflict(quotes: list[str]) -> bool:
+    """Require an unconditional healthy conclusion and an explicit issue."""
+    healthy_phrases = (
+        "未发现异常",
+        "未发现问题",
+        "不存在异常",
+        "无任何异常",
+        "无任何问题",
+        "一切正常",
+        "全部正常",
+        "整体运行正常",
+    )
+    issue_phrases = ("存在异常", "接入异常", "故障", "报错", "失败", "非标日志", "严重告警")
+    return any(any(phrase in quote for phrase in healthy_phrases) for quote in quotes) and any(
+        any(phrase in quote for phrase in issue_phrases) for quote in quotes
+    )
+
+
+def _has_placeholder_or_absolute_claim(quotes: list[str]) -> bool:
+    combined = "\n".join(quotes)
+    if re.search(
+        r"(?:待补充|待填写|请填写|客户名称\s*X{2,}|X{4,}|<[^>]{1,30}>|【(?:填写|待填)[^】]*】)",
+        combined,
+        re.IGNORECASE,
+    ):
+        return True
+    return any(
+        phrase in combined
+        for phrase in ("绝对安全", "完全不存在", "永不", "百分之百", "100%", "零风险", "一切正常", "全部正常")
+    )
+
+
+def _different_device_scopes(quotes: list[str]) -> bool:
+    """Connected inventory and the devices covered by this visit are not the same metric."""
+    has_inventory_scope = any(any(word in quote for word in ("接入", "纳管", "总计", "共计")) for quote in quotes)
+    has_visit_scope = any(any(word in quote for word in ("本次巡检", "此次巡检", "巡检了")) for quote in quotes)
+    return has_inventory_scope and has_visit_scope
+
+
 def parse_ai_findings(data: dict, text: str) -> list[dict]:
     """Accept only AI findings backed by verbatim, locatable report quotes."""
     findings = []
@@ -329,8 +368,30 @@ def parse_ai_findings(data: dict, text: str) -> list[dict]:
             dates = _extract_dates(quotes)
             if dates and len(dates) < 2:
                 continue
+        # Negative claims such as a missing chapter cannot be proven by quoting
+        # chapter names. Deterministic rules own absence checks.
+        absence_markers = ("缺失", "未提供", "未给出", "没有提供", "没有给出")
+        if any(marker in title for marker in absence_markers):
+            if "建议" in title and any(word in "".join(quotes) for word in ("建议", "需要", "优化", "处理")):
+                title = "整改建议缺少可执行细节"
+            else:
+                continue
+        if "目录" in title or "章节" in title:
+            continue
+        conflict_markers = ("矛盾", "冲突", "不一致", "错配")
+        if any(marker in title for marker in conflict_markers) and len(quotes) < 2:
+            continue
+        if "结论" in title and any(marker in title for marker in conflict_markers):
+            if not _has_explicit_conclusion_conflict(quotes):
+                continue
+        if "设备" in title and any(word in title for word in ("数", "数量")) and _different_device_scopes(quotes):
+            continue
+        if any(word in title for word in ("占位", "绝对化")) and not _has_placeholder_or_absolute_claim(quotes):
+            continue
         severity = str(raw.get("severity") or "warning").lower()
         if severity not in SEVERITY_WEIGHT:
+            severity = "warning"
+        if title == "整改建议缺少可执行细节":
             severity = "warning"
         findings.append(
             _finding(
@@ -376,8 +437,9 @@ def _run_llm_review(customer: str, product: str, filename: str, text: str) -> tu
 
     prompt = f"""你是企业安全产品巡检报告审核员。
 派单客户：{customer}；派单产品：{product}；文件：{filename}。
-检查：客户和产品错配或模板混用；日期、版本、设备数、异常数、工程师前后矛盾；目录或章节缺失；结论与异常矛盾；异常没有可执行建议；模板占位或绝对化结论；非牧云缺少末尾“设备巡检信息汇总”。
-只依据原文直接证据，禁止猜测字体、图片清晰度或页眉图案。相同问题合并，最多 8 条。evidence_quotes 必须是从报告逐字复制的 1-3 个原文片段，每段 8-120 字，不得解释或改写；无法逐字引用就不要报告。
+只检查可由原文直接证明的事实冲突：日期、版本、设备数、异常数、工程师等同一指标前后不一致；明确写“无异常/一切正常”却又写存在异常；整改建议只有“优化/处理”等空泛表述，缺少具体动作。
+不要判断目录或章节缺失、客户或产品错配、模板混用、占位符、设备巡检信息汇总，这些由硬规则处理。接入/纳管设备总数与本次巡检设备数属于不同口径，不视为矛盾；CPU/内存/磁盘正常与日志接入异常属于不同维度，不视为矛盾；同一天的不同日期格式不视为矛盾。
+相同问题合并，最多 5 条。evidence_quotes 必须是从报告逐字复制的 2-3 个原文片段，每段 8-120 字，不得解释或改写；无法用成对原文直接证明就不要报告。
 返回严格 JSON，不要 Markdown：{{"summary":"一句话结论","findings":[{{"rule_id":"AI-001","severity":"blocker|error|warning|info","title":"问题","evidence_quotes":["原文片段1","原文片段2"],"suggestion":"修改建议","page":1}}]}}。
 报告文字：{text[:60000]}
 """
@@ -394,7 +456,10 @@ def _run_llm_review(customer: str, product: str, filename: str, text: str) -> tu
     )
     data = _clean_json_block(response.choices[0].message.content)
     findings = parse_ai_findings(data, text)
-    return findings, str(data.get("summary") or "大模型审核完成")[:2000]
+    summary = str(data.get("summary") or "大模型审核完成")[:2000]
+    if not findings:
+        summary = "AI 未发现具有可定位原文证据的语义问题。"
+    return findings, summary
 
 
 def _safe_attachments(attachments: list[dict]) -> list[dict]:

@@ -70,7 +70,7 @@ class ReportAuditRulesTests(unittest.TestCase):
         )
         self.assertEqual(findings, [])
 
-    def test_ai_findings_require_verbatim_evidence_and_ignore_equivalent_dates(self):
+    def test_ai_findings_require_verbatim_evidence_and_ignore_equivalent_dates_and_scopes(self):
         text = "报告日期：2026-09-15。巡检日期：2026年09月15日。共接入设备36台，本次巡检1台设备。"
         data = {
             "findings": [
@@ -98,7 +98,7 @@ class ReportAuditRulesTests(unittest.TestCase):
             ]
         }
         findings = parse_ai_findings(data, text)
-        self.assertEqual([item["rule_id"] for item in findings], ["AI-002"])
+        self.assertEqual(findings, [])
 
     def test_ai_findings_are_deduplicated_against_hard_rules(self):
         hard = [{"rule_id": "COMMON-001"}, {"rule_id": "COMMON-006"}]
@@ -111,6 +111,64 @@ class ReportAuditRulesTests(unittest.TestCase):
             [item["rule_id"] for item in deduplicate_ai_findings(hard, ai)],
             ["AI-003"],
         )
+
+    def test_ai_findings_reject_unprovable_absence_and_unrelated_dimensions(self):
+        text = (
+            "3 巡检结果分析和处理建议。3.1 巡检概况。3.2 巡检详情。"
+            "系统cpu 使用率、内存使用率、磁盘使用率均符合预期。"
+            "部分接入异常并存在部分非标日志。"
+            "共接入设备36台，本次巡检1台设备。"
+        )
+        data = {
+            "findings": [
+                {
+                    "rule_id": "AI-001",
+                    "severity": "error",
+                    "title": "目录或章节缺失",
+                    "evidence_quotes": ["3 巡检结果分析和处理建议", "3.1 巡检概况", "3.2 巡检详情"],
+                },
+                {
+                    "rule_id": "AI-002",
+                    "severity": "error",
+                    "title": "结论与异常矛盾",
+                    "evidence_quotes": [
+                        "系统cpu 使用率、内存使用率、磁盘使用率均符合预期",
+                        "部分接入异常并存在部分非标日志",
+                    ],
+                },
+                {
+                    "rule_id": "AI-003",
+                    "severity": "error",
+                    "title": "设备数量不一致",
+                    "evidence_quotes": ["共接入设备36台", "本次巡检1台设备"],
+                },
+                {
+                    "rule_id": "AI-004",
+                    "severity": "error",
+                    "title": "模板占位或绝对化结论",
+                    "evidence_quotes": ["系统cpu 使用率、内存使用率、磁盘使用率均符合预期"],
+                },
+            ]
+        }
+        self.assertEqual(parse_ai_findings(data, text), [])
+
+    def test_ai_vague_advice_is_retained_as_warning(self):
+        text = "巡检发现部分接入异常并存在部分非标日志，需要进行策略优化。"
+        data = {
+            "findings": [
+                {
+                    "rule_id": "AI-001",
+                    "severity": "error",
+                    "title": "异常没有给出可执行建议",
+                    "evidence_quotes": ["部分接入异常并存在部分非标日志", "需要进行策略优化"],
+                    "suggestion": "补充具体动作、负责人和完成期限",
+                }
+            ]
+        }
+        findings = parse_ai_findings(data, text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["title"], "整改建议缺少可执行细节")
+        self.assertEqual(findings[0]["severity"], "warning")
 
 
 if __name__ == "__main__":
