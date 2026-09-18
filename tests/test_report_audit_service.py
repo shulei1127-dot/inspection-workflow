@@ -170,6 +170,21 @@ class ReportAuditRulesTests(unittest.TestCase):
         self.assertEqual(findings[0]["title"], "整改建议缺少可执行细节")
         self.assertEqual(findings[0]["severity"], "warning")
 
+    def test_ai_single_quote_does_not_turn_operational_issue_into_report_defect(self):
+        text = "部分接入异常并存在部分非标日志，需要进行策略优化。"
+        data = {
+            "findings": [
+                {
+                    "rule_id": "AI-001",
+                    "severity": "warning",
+                    "title": "日志接入异常",
+                    "evidence_quotes": ["部分接入异常并存在部分非标日志，需要进行策略优化"],
+                    "suggestion": "修复日志接入",
+                }
+            ]
+        }
+        self.assertEqual(parse_ai_findings(data, text), [])
+
 
 if __name__ == "__main__":
     unittest.main()

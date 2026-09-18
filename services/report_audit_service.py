@@ -360,7 +360,10 @@ def parse_ai_findings(data: dict, text: str) -> list[dict]:
             quote_key = _evidence_key(quote)
             if len(quote_key) >= 6 and quote_key in text_key:
                 quotes.append(quote[:200])
-        if not quotes:
+        # A semantic quality issue must be demonstrated by at least two report
+        # statements. A single sentence may describe a real operational issue,
+        # but that is not by itself a defect in the report.
+        if len(quotes) < 2:
             continue
         title = str(raw.get("title") or "语义审核问题")
         # Different display formats of the same calendar date are equivalent.
